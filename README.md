@@ -15,6 +15,7 @@ This project includes tools for parsing and chunking the US Code Title 26 (Inter
 ### Usage
 
 1. **Parse the XML file:**
+
    ```bash
    python ingest.py
    ```

@@ -1,6 +1,8 @@
 """
 XML Parser and Chunker for US Code Title 26 (Internal Revenue Code)
 Parses the XML file and extracts hierarchical chunks with parent/child relationships preserved.
+Only extracts: subtitles → chapters → subchapters → parts (optional) → sections → subsections
+Skips: editorial notes, repealed sections, and content below subsection level
 """
 
 from lxml import etree
@@ -16,7 +18,7 @@ class Chunk:
     """Represents a chunk of text with hierarchical metadata."""
     id: str
     text: str
-    element_type: str  # e.g., 'section', 'subsection', 'paragraph'
+    element_type: str  # e.g., 'section', 'subsection'
     identifier: Optional[str] = None  # e.g., "26 USC § 1"
     parent_id: Optional[str] = None
     children_ids: List[str] = None
@@ -30,12 +32,9 @@ class Chunk:
 
 
 class XMLParser:
-    """Parser for USLM XML documents."""
+    """Parser for USLM XML documents - Title 26 structure."""
     
-    # USLM namespace
-    NS = {'uslm': 'http://xml.house.gov/schemas/uslm/1.0'}
-    
-    # Elements that represent hierarchical structure
+    # Elements we want to extract (in hierarchical order)
     STRUCTURAL_ELEMENTS = [
         'title', 'subtitle', 'chapter', 'subchapter', 
         'part', 'subpart', 'section', 'subsection', 
@@ -46,17 +45,43 @@ class XMLParser:
     def __init__(self, xml_path: str):
         self.xml_path = xml_path
         self.chunks: List[Chunk] = []
-        self.element_stack: List[etree.Element] = []  # Track parent hierarchy
         self.id_counter = 0
         
-    def _get_text_content(self, element: etree.Element) -> str:
-        """Extract all text content from an element, preserving structure."""
-        # Use itertext for cleaner text extraction
+    def _get_text_content(self, element: etree.Element, skip_notes: bool = True) -> str:
+        """Extract text content from an element, skipping notes if requested."""
         text_parts = []
-        for text in element.itertext():
-            cleaned = text.strip()
-            if cleaned:
-                text_parts.append(cleaned)
+        
+        # Get element's own text first
+        if element.text:
+            text_parts.append(element.text.strip())
+        
+        for child in element:
+            # Skip all note elements (editorial notes, amendments, etc.)
+            tag_name = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if skip_notes and tag_name == 'note':
+                continue
+            
+            # For sections and subsections, only get content from <content> elements
+            # and skip editorial notes, amendments, etc.
+            if tag_name == 'content':
+                # Get all text from content element
+                content_text = self._get_text_content(child, skip_notes=True)
+                if content_text:
+                    text_parts.append(content_text)
+            elif tag_name in ['heading', 'num']:
+                # Include headings and numbers
+                child_text = self._get_text_content(child, skip_notes=True)
+                if child_text:
+                    text_parts.append(child_text)
+            elif tag_name in ['p', 'paragraph', 'subparagraph', 'clause', 'chapeau', 'continuation']:
+                # Include actual content paragraphs
+                child_text = self._get_text_content(child, skip_notes=True)
+                if child_text:
+                    text_parts.append(child_text)
+            
+            # Add tail text
+            if child.tail:
+                text_parts.append(child.tail.strip())
         
         return ' '.join(text_parts)
     
@@ -65,33 +90,75 @@ class XMLParser:
         # Check for identifier attribute
         identifier = element.get('identifier')
         if identifier:
-            return identifier
+            # Extract just the section/subsection number from identifier
+            # e.g., "/us/usc/t26/s1503" -> "1503"
+            # e.g., "/us/usc/t26/s1503/a" -> "1503(a)"
+            parts = identifier.split('/')
+            if len(parts) > 0:
+                last_part = parts[-1]
+                if last_part.startswith('s'):
+                    # Section identifier
+                    section_num = last_part[1:]
+                    # Check if there's a subsection
+                    if len(parts) > 1 and parts[-2].startswith('s'):
+                        # This is a subsection
+                        parent_section = parts[-2][1:]
+                        subsection = section_num
+                        return f"{parent_section}({subsection})"
+                    return section_num
+                elif last_part.startswith('st'):
+                    # Subtitle
+                    return last_part[2:]  # e.g., "A"
+                elif last_part.startswith('ch'):
+                    # Chapter
+                    return last_part[2:]  # e.g., "1"
+                elif last_part.startswith('sch'):
+                    # Subchapter
+                    return last_part[3:]  # e.g., "A"
+                elif last_part.startswith('pt'):
+                    # Part
+                    return last_part[2:]  # e.g., "I"
         
         # Check for num element with value
-        num_elem = element.find('.//uslm:num', self.NS)
-        if num_elem is not None:
-            value = num_elem.get('value')
-            if value:
-                return value
-            # Get text content if no value attribute
-            if num_elem.text:
-                return num_elem.text.strip()
+        for num_elem in element.iter():
+            tag_name = num_elem.tag.split('}')[-1] if '}' in num_elem.tag else num_elem.tag
+            if tag_name == 'num':
+                value = num_elem.get('value')
+                if value:
+                    return value
+                # Get text content if no value attribute
+                if num_elem.text:
+                    return num_elem.text.strip()
+                break
         
         return None
     
     def _get_heading(self, element: etree.Element) -> Optional[str]:
         """Extract heading text from element."""
-        heading_elem = element.find('.//uslm:heading', self.NS)
-        if heading_elem is not None and heading_elem.text:
-            return heading_elem.text.strip()
+        # Try to find heading element (handle namespaces)
+        for heading_elem in element.iter():
+            tag_name = heading_elem.tag.split('}')[-1] if '}' in heading_elem.tag else heading_elem.tag
+            if tag_name == 'heading':
+                heading_text = self._get_text_content(heading_elem, skip_notes=True)
+                if heading_text:
+                    return heading_text.strip()
         return None
+    
+    def _is_repealed(self, element: etree.Element) -> bool:
+        """Check if an element is repealed by looking for 'Repealed' in heading."""
+        heading = self._get_heading(element)
+        if heading and 'repealed' in heading.lower():
+            return True
+        return False
     
     def _generate_id(self, element: etree.Element) -> str:
         """Generate a unique ID for an element."""
         # Use identifier if available
         identifier = self._get_identifier(element)
+        tag_name = element.tag.split('}')[-1]
+        
         if identifier:
-            return f"{element.tag.split('}')[-1]}_{identifier}"
+            return f"{tag_name}_{identifier.replace('/', '_')}"
         
         # Use element ID if available
         elem_id = element.get('id')
@@ -102,35 +169,34 @@ class XMLParser:
         self.id_counter += 1
         return f"chunk_{self.id_counter}"
     
-    def _get_parent_id(self) -> Optional[str]:
-        """Get the ID of the current parent element."""
-        if self.element_stack:
-            parent = self.element_stack[-1]
-            return self._generate_id(parent)
-        return None
-    
     def _should_chunk(self, element: etree.Element) -> bool:
         """Determine if an element should be chunked."""
-        tag_name = element.tag.split('}')[-1]
-        
-        # Always chunk structural elements
-        if tag_name in self.STRUCTURAL_ELEMENTS:
-            return True
-        
-        # Chunk paragraphs and other content elements
-        if tag_name in ['p', 'paragraph', 'subparagraph']:
-            return True
-        
-        return False
+        tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        return tag_name in self.STRUCTURAL_ELEMENTS
     
-    def _create_chunk(self, element: etree.Element) -> Chunk:
+    def _create_chunk(self, element: etree.Element, parent_chunk: Optional[Chunk]) -> Optional[Chunk]:
         """Create a Chunk object from an element."""
-        tag_name = element.tag.split('}')[-1]
-        chunk_id = self._generate_id(element)
-        parent_id = self._get_parent_id()
+        # Skip if repealed
+        if self._is_repealed(element):
+            return None
         
-        # Extract text content
-        text = self._get_text_content(element)
+        tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        chunk_id = self._generate_id(element)
+        parent_id = parent_chunk.id if parent_chunk else None
+        
+        # For sections and subsections, extract text content (skip notes)
+        # For higher-level elements (subtitle, chapter, etc.), just get heading
+        if tag_name in ['section', 'subsection']:
+            text = self._get_text_content(element, skip_notes=True)
+        else:
+            # For higher levels, just get heading and identifier
+            heading = self._get_heading(element)
+            identifier = self._get_identifier(element)
+            text = heading or identifier or tag_name
+        
+        # Skip if no meaningful text
+        if not text or len(text.strip()) < 3:
+            return None
         
         # Get identifier
         identifier = self._get_identifier(element)
@@ -162,6 +228,33 @@ class XMLParser:
         
         return chunk
     
+    def _process_element(self, element: etree.Element, parent_chunk: Optional[Chunk]):
+        """Recursively process an element and its children, skipping notes."""
+        tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        
+        # Skip all note elements entirely (and their children)
+        if tag_name == 'note':
+            return
+        
+        # Skip other non-structural elements we don't care about
+        skip_tags = ['notes', 'toc', 'layout', 'table', 'thead', 'tbody', 'tr', 'td', 'th']
+        if tag_name in skip_tags:
+            return
+        
+        # Check if we should chunk this element
+        if self._should_chunk(element):
+            chunk = self._create_chunk(element, parent_chunk)
+            if chunk:
+                self.chunks.append(chunk)
+                parent_chunk = chunk
+        
+        # Process children (but skip notes and other unwanted elements)
+        for child in element:
+            child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            # Skip notes and other unwanted elements
+            if child_tag not in ['note', 'notes', 'toc', 'layout', 'table']:
+                self._process_element(child, parent_chunk)
+    
     def parse(self) -> List[Chunk]:
         """Parse the XML file and extract chunks."""
         print(f"Parsing XML file: {self.xml_path}")
@@ -170,49 +263,23 @@ class XMLParser:
         tree = etree.parse(self.xml_path)
         root = tree.getroot()
         
-        # Register namespace for easier searching
-        for prefix, uri in root.nsmap.items():
-            if uri == self.NS['uslm']:
-                etree.register_namespace(prefix or 'uslm', uri)
-        
-        # Find the main content area - try different approaches
+        # Find the main content area
         main = None
-        if root.tag.endswith('}main'):
-            main = root
-        else:
-            # Try to find main element
-            for elem in root.iter():
-                if elem.tag.endswith('}main'):
-                    main = elem
-                    break
+        # Try to find main element
+        for elem in root.iter():
+            if elem.tag.endswith('}main'):
+                main = elem
+                break
         
         if main is None:
             # If no main element, start from root
             main = root
         
-        # Recursively process elements
+        # Recursively process elements starting from main
         self._process_element(main, None)
         
         print(f"Extracted {len(self.chunks)} chunks")
         return self.chunks
-    
-    def _process_element(self, element: etree.Element, parent_chunk: Optional[Chunk]):
-        """Recursively process an element and its children."""
-        # Check if we should chunk this element
-        if self._should_chunk(element):
-            chunk = self._create_chunk(element)
-            
-            # Set parent relationship
-            if parent_chunk:
-                chunk.parent_id = parent_chunk.id
-                parent_chunk.children_ids.append(chunk.id)
-            
-            self.chunks.append(chunk)
-            parent_chunk = chunk
-        
-        # Process children
-        for child in element:
-            self._process_element(child, parent_chunk)
     
     def save_chunks(self, output_path: str, format: str = 'json'):
         """Save chunks to a file."""
