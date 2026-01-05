@@ -47,6 +47,127 @@ class XMLParser:
         self.chunks: List[Chunk] = []
         self.id_counter = 0
         
+    def _extract_table(self, table_elem: etree.Element) -> Dict[str, Any]:
+        """Extract table content and convert to structured format."""
+        table_data = {
+            'headers': [],
+            'rows': [],
+            'text': ''
+        }
+        
+        # Extract headers from thead (handle namespaces)
+        # Find thead element
+        thead = None
+        for elem in table_elem.iter():
+            tag_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+            if tag_name == 'thead':
+                thead = elem
+                break
+        
+        if thead is not None:
+            # Find tr elements within thead (direct children first, then all)
+            # Try direct children first
+            for tr in thead:
+                tr_tag = tr.tag.split('}')[-1] if '}' in tr.tag else tr.tag
+                if tr_tag == 'tr':
+                    # Find th elements within this tr (direct children only)
+                    for th in tr:
+                        th_tag = th.tag.split('}')[-1] if '}' in th.tag else th.tag
+                        if th_tag == 'th':
+                            header_text = self._get_cell_text(th)
+                            if header_text:
+                                table_data['headers'].append(header_text)
+                    # Process all header rows (in case there are multiple)
+                    # But typically we only want the first row
+                    if table_data['headers']:
+                        break
+            
+            # If we didn't find headers in direct children, try iterating
+            if not table_data['headers']:
+                for tr in thead.iter():
+                    tr_tag = tr.tag.split('}')[-1] if '}' in tr.tag else tr.tag
+                    if tr_tag == 'tr':
+                        # Find th elements within this tr
+                        for th in tr.iter():
+                            th_tag = th.tag.split('}')[-1] if '}' in th.tag else th.tag
+                            if th_tag == 'th':
+                                header_text = self._get_cell_text(th)
+                                if header_text and header_text not in table_data['headers']:
+                                    table_data['headers'].append(header_text)
+                        if table_data['headers']:
+                            break
+        
+        # Extract rows from tbody (handle namespaces)
+        tbody = None
+        for elem in table_elem.iter():
+            tag_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+            if tag_name == 'tbody':
+                tbody = elem
+                break
+        
+        if tbody is not None:
+            # Find tr elements within tbody
+            for tr in tbody.iter():
+                tr_tag = tr.tag.split('}')[-1] if '}' in tr.tag else tr.tag
+                if tr_tag == 'tr':
+                    row = []
+                    # Find td elements within this tr (direct children only)
+                    for td in tr:
+                        td_tag = td.tag.split('}')[-1] if '}' in td.tag else td.tag
+                        if td_tag == 'td':
+                            cell_text = self._get_cell_text(td)
+                            row.append(cell_text)
+                    if row:
+                        table_data['rows'].append(row)
+        
+        # Create readable text representation
+        text_parts = []
+        if table_data['headers']:
+            text_parts.append(' | '.join(table_data['headers']))
+            text_parts.append('-' * 50)
+        
+        for row in table_data['rows']:
+            text_parts.append(' | '.join(row))
+        
+        table_data['text'] = '\n'.join(text_parts)
+        
+        return table_data
+    
+    def _get_cell_text(self, cell_elem: etree.Element) -> str:
+        """Extract text from a table cell (td or th), including all nested elements."""
+        # Use itertext() to get all text content regardless of nesting
+        # This handles <b>, <span>, <p>, and any other nested elements
+        text_parts = []
+        
+        # Get all text from the element and all its descendants
+        for text in cell_elem.itertext():
+            cleaned = text.strip()
+            if cleaned:
+                text_parts.append(cleaned)
+        
+        # Join all text parts with spaces
+        result = ' '.join(text_parts).strip()
+        
+        # If we got nothing, try a fallback approach
+        if not result:
+            # Fallback: get direct text and text from direct children
+            if cell_elem.text:
+                text_parts.append(cell_elem.text.strip())
+            
+            for child in cell_elem:
+                # Recursively get text from child
+                child_text = self._get_cell_text(child)
+                if child_text:
+                    text_parts.append(child_text)
+                
+                # Add tail text
+                if child.tail:
+                    text_parts.append(child.tail.strip())
+            
+            result = ' '.join(text_parts).strip()
+        
+        return result
+    
     def _get_text_content(self, element: etree.Element, skip_notes: bool = True) -> str:
         """Extract text content from an element, skipping notes if requested."""
         text_parts = []
@@ -68,6 +189,12 @@ class XMLParser:
                 content_text = self._get_text_content(child, skip_notes=True)
                 if content_text:
                     text_parts.append(content_text)
+            elif tag_name == 'table':
+                # Extract table and include its text representation
+                table_data = self._extract_table(child)
+                if table_data['text']:
+                    # Include table in readable format
+                    text_parts.append('\n\n[Table]\n' + table_data['text'] + '\n')
             elif tag_name in ['heading', 'num']:
                 # Include headings and numbers
                 child_text = self._get_text_content(child, skip_notes=True)
@@ -155,7 +282,7 @@ class XMLParser:
         """Generate a unique ID for an element."""
         # Use identifier if available
         identifier = self._get_identifier(element)
-        tag_name = element.tag.split('}')[-1]
+        tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
         
         if identifier:
             return f"{tag_name}_{identifier.replace('/', '_')}"
@@ -174,6 +301,19 @@ class XMLParser:
         tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
         return tag_name in self.STRUCTURAL_ELEMENTS
     
+    def _extract_tables_from_element(self, element: etree.Element) -> List[Dict[str, Any]]:
+        """Extract all tables from an element and return structured data."""
+        tables = []
+        
+        # Find all table elements (handle xhtml namespace)
+        for table_elem in element.iter():
+            tag_name = table_elem.tag.split('}')[-1] if '}' in table_elem.tag else table_elem.tag
+            if tag_name == 'table':
+                table_data = self._extract_table(table_elem)
+                tables.append(table_data)
+        
+        return tables
+    
     def _create_chunk(self, element: etree.Element, parent_chunk: Optional[Chunk]) -> Optional[Chunk]:
         """Create a Chunk object from an element."""
         # Skip if repealed
@@ -188,11 +328,14 @@ class XMLParser:
         # For higher-level elements (subtitle, chapter, etc.), just get heading
         if tag_name in ['section', 'subsection']:
             text = self._get_text_content(element, skip_notes=True)
+            # Also extract tables as structured data
+            tables = self._extract_tables_from_element(element)
         else:
             # For higher levels, just get heading and identifier
             heading = self._get_heading(element)
             identifier = self._get_identifier(element)
             text = heading or identifier or tag_name
+            tables = []
         
         # Skip if no meaningful text
         if not text or len(text.strip()) < 3:
@@ -211,6 +354,10 @@ class XMLParser:
             'identifier': identifier,
             'heading': heading,
         }
+        
+        # Add tables to metadata if present
+        if tables:
+            metadata['tables'] = tables
         
         # Add any other relevant attributes
         for attr_name, attr_value in element.attrib.items():
@@ -237,7 +384,8 @@ class XMLParser:
             return
         
         # Skip other non-structural elements we don't care about
-        skip_tags = ['notes', 'toc', 'layout', 'table', 'thead', 'tbody', 'tr', 'td', 'th']
+        # Note: We don't skip 'table' here because we want to extract table content
+        skip_tags = ['notes', 'toc', 'layout', 'thead', 'tbody', 'tr', 'td', 'th', 'colgroup', 'col']
         if tag_name in skip_tags:
             return
         

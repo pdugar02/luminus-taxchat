@@ -4,7 +4,6 @@ Chunking utilities for splitting large text chunks while preserving relationship
 
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
-import re
 
 
 @dataclass
