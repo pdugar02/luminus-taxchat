@@ -442,9 +442,10 @@ class XMLParser:
 
 def main():
     """Main function to parse XML and extract chunks."""
-    xml_path = Path(__file__).parent / "usc26.xml"
-    output_path = Path(__file__).parent / "chunks.json"
-    rag_output_path = Path(__file__).parent / "rag_chunks.json"
+    data_dir = Path(__file__).parent / "data"
+    xml_path = data_dir / "usc26.xml"
+    output_path = data_dir / "chunks.json"
+    rag_output_path = data_dir / "rag_chunks.json"
     
     # Parse XML
     parser = XMLParser(str(xml_path))

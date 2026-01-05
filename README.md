@@ -10,7 +10,9 @@ This project includes tools for parsing and chunking the US Code Title 26 (Inter
 
 - `ingest.py`: Main XML parser that extracts hierarchical chunks from the XML file
 - `chunk.py`: Chunking utilities for splitting large text chunks while preserving relationships
-- `usc26.xml`: The source XML file (55MB)
+- `data/usc26.xml`: The source XML file (55MB)
+- `data/chunks.json`: Raw parsed chunks with full hierarchy
+- `data/rag_chunks.json`: Chunks optimized for RAG ingestion
 
 ### Usage
 
@@ -24,9 +26,9 @@ This project includes tools for parsing and chunking the US Code Title 26 (Inter
    - Parse the XML file and extract hierarchical chunks
    - Preserve parent/child relationships
    - Split large chunks into smaller ones suitable for RAG
-   - Generate two output files:
-     - `chunks.json`: Raw parsed chunks with full hierarchy
-     - `rag_chunks.json`: Chunks optimized for RAG ingestion
+   - Generate two output files in the `data/` folder:
+     - `data/chunks.json`: Raw parsed chunks with full hierarchy
+     - `data/rag_chunks.json`: Chunks optimized for RAG ingestion
 
 ### How It Works
 
