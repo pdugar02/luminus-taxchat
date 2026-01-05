@@ -1,0 +1,30 @@
+# Large XML source file
+data/usc26.xml
+
+# Generated chunk files (can be regenerated from XML)
+data/chunks.json
+data/rag_chunks.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
