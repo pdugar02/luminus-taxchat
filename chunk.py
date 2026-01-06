@@ -180,18 +180,20 @@ class Chunker:
         return result_chunks
 
 
-def chunk_for_rag(chunks: List[Dict], chunk_size: int = 1000) -> List[Dict]:
+def chunk_for_rag(chunks: List[Dict], chunk_size: int = 2000, chunk_overlap: int = 400) -> List[Dict]:
     """
     Prepare chunks for RAG ingestion.
     
     Args:
         chunks: List of chunk dictionaries
         chunk_size: Target chunk size
+        chunk_overlap: Overlap between chunks (in characters). Default is 200.
+                      Set to 0 to disable overlap.
         
     Returns:
         List of dictionaries ready for RAG indexing
     """
-    chunker = Chunker(chunk_size=chunk_size)
+    chunker = Chunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     text_chunks = chunker.chunk_with_relationships(chunks, max_chunk_size=chunk_size)
     
     # Convert to dictionaries

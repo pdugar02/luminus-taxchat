@@ -1,13 +1,15 @@
 """
 XML Parser and Chunker for US Code Title 26 (Internal Revenue Code)
 Parses the XML file and extracts hierarchical chunks with parent/child relationships preserved.
-Only extracts: subtitles → chapters → subchapters → parts (optional) → sections → subsections
-Skips: editorial notes, repealed sections, and content below subsection level
+Extracts: subtitles → chapters → subchapters → parts (optional) → sections → subsections → paragraphs
+Subparagraphs and clauses are included in paragraph text, not chunked separately.
+Skips: editorial notes, repealed sections
 """
 
 from lxml import etree
 from typing import List, Dict, Optional, Any
 import json
+import argparse
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from chunk import chunk_for_rag
@@ -169,12 +171,25 @@ class XMLParser:
         return result
     
     def _get_text_content(self, element: etree.Element, skip_notes: bool = True) -> str:
-        """Extract text content from an element, skipping notes if requested."""
+        """Extract text content from an element, skipping notes and structural children."""
         text_parts = []
         
         # Get element's own text first
         if element.text:
             text_parts.append(element.text.strip())
+        
+        # Determine what structural children to skip based on current element type
+        current_tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        
+        # Define hierarchy: skip structural children that will be chunked separately
+        # Note: subparagraphs and clauses are NOT skipped for paragraphs - they're included in paragraph text
+        skip_structural_children = []
+        if current_tag == 'section':
+            skip_structural_children = ['subsection']
+        elif current_tag == 'subsection':
+            skip_structural_children = ['paragraph']
+        # For paragraphs, include subparagraphs and clauses in the text (don't skip them)
+        # They won't be chunked separately because _should_chunk excludes them
         
         for child in element:
             # Skip all note elements (editorial notes, amendments, etc.)
@@ -182,8 +197,11 @@ class XMLParser:
             if skip_notes and tag_name == 'note':
                 continue
             
-            # For sections and subsections, only get content from <content> elements
-            # and skip editorial notes, amendments, etc.
+            # Skip structural children that will be chunked separately
+            if tag_name in skip_structural_children:
+                continue
+            
+            # Extract content from various content elements
             if tag_name == 'content':
                 # Get all text from content element
                 content_text = self._get_text_content(child, skip_notes=True)
@@ -198,8 +216,9 @@ class XMLParser:
                 child_text = self._get_text_content(child, skip_notes=True)
                 if child_text:
                     text_parts.append(child_text)
-            elif tag_name in ['p', 'paragraph', 'subparagraph', 'clause', 'chapeau', 'continuation']:
-                # Include actual content paragraphs
+            elif tag_name in ['p', 'chapeau', 'continuation', 'subparagraph', 'clause']:
+                # Include actual content paragraphs, chapeau, continuation text, subparagraphs, and clauses
+                # Subparagraphs and clauses are included in paragraph text, not chunked separately
                 child_text = self._get_text_content(child, skip_notes=True)
                 if child_text:
                     text_parts.append(child_text)
@@ -295,9 +314,15 @@ class XMLParser:
         return f"chunk_{self.id_counter}"
     
     def _should_chunk(self, element: etree.Element) -> bool:
-        """Determine if an element should be chunked."""
+        """Determine if an element should be chunked.
+        Only chunk up to paragraph level - subparagraphs and clauses are included in paragraph text."""
         tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
-        return tag_name in self.STRUCTURAL_ELEMENTS
+        # Don't chunk subparagraphs and clauses separately - they're part of paragraph text
+        chunkable_elements = [
+            'title', 'subtitle', 'chapter', 'subchapter', 
+            'part', 'subpart', 'section', 'subsection', 'paragraph'
+        ]
+        return tag_name in chunkable_elements
     
     def _extract_tables_from_element(self, element: etree.Element) -> List[Dict[str, Any]]:
         """Extract tables from an element, but only from direct content (not from structural children like subsections)."""
@@ -352,12 +377,16 @@ class XMLParser:
         chunk_id = self._generate_id(element)
         parent_id = parent_chunk.id if parent_chunk else None
         
-        # For sections and subsections, extract text content (skip notes)
+        # For sections, subsections, and paragraphs, extract full text content
+        # Subparagraphs and clauses are included in paragraph text, not chunked separately
         # For higher-level elements (subtitle, chapter, etc.), just get heading
-        if tag_name in ['section', 'subsection']:
+        if tag_name in ['section', 'subsection', 'paragraph']:
             text = self._get_text_content(element, skip_notes=True)
-            # Also extract tables as structured data
-            tables = self._extract_tables_from_element(element)
+            # Also extract tables as structured data (only for sections and subsections)
+            if tag_name in ['section', 'subsection']:
+                tables = self._extract_tables_from_element(element)
+            else:
+                tables = []
         else:
             # For higher levels, just get heading and identifier
             heading = self._get_heading(element)
@@ -468,8 +497,15 @@ class XMLParser:
             raise ValueError(f"Unsupported format: {format}")
 
 
-def main():
-    """Main function to parse XML and extract chunks."""
+def main(chunk_size: int = 1000, chunk_overlap: int = 200):
+    """
+    Main function to parse XML and extract chunks.
+    
+    Args:
+        chunk_size: Maximum size for chunks (in characters). Default is 1000.
+        chunk_overlap: Overlap between chunks (in characters). Default is 200.
+                      Set to 0 to disable overlap.
+    """
     data_dir = Path(__file__).parent / "data"
     xml_path = data_dir / "usc26.xml"
     output_path = data_dir / "chunks.json"
@@ -486,8 +522,8 @@ def main():
     chunks_dict = [asdict(chunk) for chunk in chunks]
     
     # Apply chunking for RAG (split large chunks)
-    print("\nApplying chunking for RAG...")
-    rag_chunks = chunk_for_rag(chunks_dict, chunk_size=1000)
+    print(f"\nApplying chunking for RAG (chunk_size={chunk_size}, chunk_overlap={chunk_overlap})...")
+    rag_chunks = chunk_for_rag(chunks_dict, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     
     # Save RAG-ready chunks
     with open(rag_output_path, 'w', encoding='utf-8') as f:
@@ -529,4 +565,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Parse US Code Title 26 XML and extract chunks for RAG')
+    parser.add_argument(
+        '--chunk-size',
+        type=int,
+        default=1000,
+        help='Maximum chunk size in characters (default: 1000)'
+    )
+    parser.add_argument(
+        '--chunk-overlap',
+        type=int,
+        default=200,
+        help='Overlap between chunks in characters (default: 200). Set to 0 to disable overlap.'
+    )
+    args = parser.parse_args()
+    main(chunk_size=args.chunk_size, chunk_overlap=args.chunk_overlap)
