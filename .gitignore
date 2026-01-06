@@ -1,9 +1,5 @@
-# Large XML source file
-data/usc26.xml
-
-# Generated chunk files (can be regenerated from XML)
-data/chunks.json
-data/rag_chunks.json
+#Don't track data folder (index, embeddings, chunks, raw data)
+data/*
 
 # Python cache
 __pycache__/
