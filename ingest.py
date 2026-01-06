@@ -190,11 +190,9 @@ class XMLParser:
                 if content_text:
                     text_parts.append(content_text)
             elif tag_name == 'table':
-                # Extract table and include its text representation
-                table_data = self._extract_table(child)
-                if table_data['text']:
-                    # Include table in readable format
-                    text_parts.append('\n\n[Table]\n' + table_data['text'] + '\n')
+                # Skip table elements - they are extracted separately and stored in metadata
+                # Don't add table text representation to chunk text
+                continue
             elif tag_name in ['heading', 'num']:
                 # Include headings and numbers
                 child_text = self._get_text_content(child, skip_notes=True)
@@ -302,15 +300,45 @@ class XMLParser:
         return tag_name in self.STRUCTURAL_ELEMENTS
     
     def _extract_tables_from_element(self, element: etree.Element) -> List[Dict[str, Any]]:
-        """Extract all tables from an element and return structured data."""
+        """Extract tables from an element, but only from direct content (not from structural children like subsections)."""
         tables = []
+        tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
         
-        # Find all table elements (handle xhtml namespace)
-        for table_elem in element.iter():
-            tag_name = table_elem.tag.split('}')[-1] if '}' in table_elem.tag else table_elem.tag
-            if tag_name == 'table':
-                table_data = self._extract_table(table_elem)
-                tables.append(table_data)
+        # For sections, only extract tables from direct content, not from subsections
+        # For subsections, extract all tables normally
+        if tag_name == 'section':
+            # Only look for tables in direct children (like <content>), not in subsections
+            for child in element:
+                child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                # Skip structural children like subsections - they'll extract their own tables
+                if child_tag in self.STRUCTURAL_ELEMENTS:
+                    continue
+                # Look for tables only in this direct child's content
+                for table_elem in child.iter():
+                    table_tag = table_elem.tag.split('}')[-1] if '}' in table_elem.tag else table_elem.tag
+                    if table_tag == 'table':
+                        # Verify this table is not inside a structural child element
+                        # by checking if any ancestor between table and element is structural
+                        parent = table_elem.getparent()
+                        is_in_structural_child = False
+                        while parent is not None and parent != element:
+                            parent_tag = parent.tag.split('}')[-1] if '}' in parent.tag else parent.tag
+                            if parent_tag in self.STRUCTURAL_ELEMENTS:
+                                is_in_structural_child = True
+                                break
+                            parent = parent.getparent()
+                        
+                        # Only add table if it's not inside a structural child
+                        if not is_in_structural_child:
+                            table_data = self._extract_table(table_elem)
+                            tables.append(table_data)
+        else:
+            # For subsections and other elements, extract all tables normally
+            for table_elem in element.iter():
+                table_tag = table_elem.tag.split('}')[-1] if '}' in table_elem.tag else table_elem.tag
+                if table_tag == 'table':
+                    table_data = self._extract_table(table_elem)
+                    tables.append(table_data)
         
         return tables
     
