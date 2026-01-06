@@ -1,0 +1,16 @@
+# Core dependencies
+lxml>=4.9.0
+requests>=2.31.0
+
+# LlamaIndex for RAG framework
+llama-index>=0.10.0
+# Embeddings - use sentence-transformers directly
+sentence-transformers>=2.2.0
+
+# Ollama for local LLM inference
+ollama>=0.1.0
+
+# Optional: For future vector database migration
+# chromadb>=0.4.0
+# qdrant-client>=1.7.0
+

@@ -52,8 +52,93 @@ This project includes tools for parsing and chunking the US Code Title 26 (Inter
      - `element_type`: Type of XML element (section, subsection, etc.)
      - `identifier`: Section number or other identifier
 
+## RAG Query System
+
+The project includes a RAG (Retrieval-Augmented Generation) system for querying the tax code using LlamaIndex and local Llama 3.1 via Ollama.
+
+### Setup
+
+1. **Install dependencies:**
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Install and start Ollama:**
+
+   - Download from https://ollama.ai
+   - Pull the Llama 3.1 model:
+     ```bash
+     ollama pull llama3.1
+     ```
+   - Make sure Ollama is running (it should start automatically)
+
+3. **Build the index:**
+
+   The first time you run the query system, it will automatically build an index from `data/rag_chunks.json`. This may take several minutes as it creates embeddings for all chunks.
+
+### Usage
+
+**Interactive mode:**
+
+```bash
+python index.py
+```
+
+**Single query:**
+
+```bash
+python index.py "What is the tax rate for married couples filing jointly?"
+```
+
+### How It Works
+
+1. **Indexing**: The system loads chunks from `data/rag_chunks.json` and creates embeddings using a HuggingFace model (BAAI/bge-small-en-v1.5 by default).
+
+2. **Querying**: When you ask a question:
+   - The system finds the most relevant chunks using semantic search
+   - Retrieves top 5 relevant chunks with their metadata (section numbers, headings)
+   - Formats context with section identifiers and parent/child relationships
+   - Sends to Llama 3.1 via Ollama for answer generation
+   - Returns answer with source citations
+
+3. **Metadata Context**: The system includes section numbers, headings, and hierarchical relationships in the context to provide better answers.
+
+### Configuration
+
+You can customize the system by modifying parameters in `index.py`:
+
+- `embedding_model`: Change the embedding model (default: "BAAI/bge-small-en-v1.5")
+- `ollama_model`: Change the Ollama model (default: "llama3.1")
+- `ollama_base_url`: Change Ollama server URL (default: "http://localhost:11434")
+- `similarity_top_k`: Number of chunks to retrieve (default: 5)
+
+### Rebuilding the Index
+
+If you update the chunks, rebuild the index:
+
+```python
+from index import TaxCodeRAG
+rag = TaxCodeRAG()
+rag.rebuild_index()
+```
+
+### Future Migration to Vector Database
+
+The system is designed for easy migration to a vector database (Chroma, Qdrant, etc.):
+
+1. Install the vector database client (e.g., `pip install chromadb`)
+2. Replace `SimpleVectorStore` with `ChromaVectorStore` or `QdrantVectorStore` in `index.py`
+3. No changes needed to query logic
+
 ### Requirements
 
 ```bash
-pip install lxml
+pip install -r requirements.txt
 ```
+
+Core dependencies:
+- `lxml`: XML parsing
+- `llama-index`: RAG framework
+- `llama-index-embeddings-huggingface`: Embeddings
+- `ollama`: Local LLM inference
