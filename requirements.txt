@@ -10,6 +10,9 @@ sentence-transformers>=2.2.0
 # Ollama for local LLM inference
 ollama>=0.1.0
 
+# Flask for web interface
+flask>=3.0.0
+
 # Optional: For future vector database migration
 # chromadb>=0.4.0
 # qdrant-client>=1.7.0
