@@ -37,69 +37,86 @@ def query():
         
         rag_system = get_rag()
         
-        # Query the RAG system
+        # Get optional parameters
+        expand_query = data.get('expand_query', True)  # Enable query expansion by default
+        top_k = data.get('top_k', 10)  # Number of chunks to retrieve
+        
+        # Query the RAG system with improved retrieval
         if retrieve_only:
-            # Just retrieve chunks without LLM
-            retriever = rag_system.index.as_retriever(similarity_top_k=5)
-            nodes = retriever.retrieve(question)
+            # Just retrieve chunks without LLM (uses improved retrieval with query expansion)
+            result = rag_system.query(
+                question, 
+                retrieve_only=True,
+                expand_query=expand_query,
+                top_k=top_k
+            )
             
             chunks = []
-            for node in nodes:
-                score = getattr(node, 'score', None)
-                metadata = node.metadata if hasattr(node, 'metadata') else {}
+            for source in result.get('sources', []):
                 chunks.append({
-                    'id': node.node_id,
-                    'text': node.text,
-                    'score': f"{score:.4f}" if score is not None else None,
-                    'metadata': {
-                        'identifier': metadata.get('identifier', 'N/A'),
-                        'heading': metadata.get('heading', 'N/A'),
-                        'tag': metadata.get('tag', 'N/A'),
-                    }
+                    'id': source.get('id'),
+                    'text': source.get('text_preview', ''),
+                    'score': source.get('score'),
+                    'metadata': source.get('metadata', {})
                 })
             
             return jsonify({
-                'answer': f'Retrieved {len(chunks)} relevant chunks (retrieve_only mode)',
+                'answer': result.get('answer', ''),
                 'chunks': chunks,
                 'retrieve_only': True
             })
         else:
-            # Full query with LLM
-            # First retrieve chunks to show them
-            retriever = rag_system.index.as_retriever(similarity_top_k=5)
-            retrieved_nodes = retriever.retrieve(question)
-            
-            chunks = []
-            for node in retrieved_nodes:
-                score = getattr(node, 'score', None)
-                metadata = node.metadata if hasattr(node, 'metadata') else {}
-                chunks.append({
-                    'id': node.node_id,
-                    'text': node.text,
-                    'score': f"{score:.4f}" if score is not None else None,
-                    'metadata': {
-                        'identifier': metadata.get('identifier', 'N/A'),
-                        'heading': metadata.get('heading', 'N/A'),
-                        'tag': metadata.get('tag', 'N/A'),
-                    }
-                })
-            
-            # Then get LLM answer
+            # Full query with LLM (uses improved retrieval with query expansion)
             try:
-                result = rag_system.query(question, include_sources=True)
+                result = rag_system.query(
+                    question, 
+                    include_sources=True,
+                    expand_query=expand_query,
+                    top_k=top_k
+                )
+                
+                # Extract chunks from sources
+                chunks = []
+                for source in result.get('sources', []):
+                    chunks.append({
+                        'id': source.get('id'),
+                        'text': source.get('text_preview', ''),
+                        'score': source.get('score'),
+                        'metadata': source.get('metadata', {})
+                    })
+                
                 return jsonify({
                     'answer': result.get('answer', ''),
                     'sources': result.get('sources', []),
                     'chunks': chunks
                 })
             except Exception as e:
-                # If LLM times out, still return the chunks
-                return jsonify({
-                    'answer': f'Retrieved relevant chunks, but LLM generation failed: {str(e)}',
-                    'sources': [],
-                    'chunks': chunks,
-                    'error': str(e)
-                })
+                # If LLM times out, still try to retrieve chunks
+                try:
+                    retrieve_result = rag_system.query(
+                        question,
+                        retrieve_only=True,
+                        expand_query=expand_query,
+                        top_k=top_k
+                    )
+                    chunks = []
+                    for source in retrieve_result.get('sources', []):
+                        chunks.append({
+                            'id': source.get('id'),
+                            'text': source.get('text_preview', ''),
+                            'score': source.get('score'),
+                            'metadata': source.get('metadata', {})
+                        })
+                    return jsonify({
+                        'answer': f'Retrieved relevant chunks, but LLM generation failed: {str(e)}',
+                        'sources': [],
+                        'chunks': chunks,
+                        'error': str(e)
+                    })
+                except Exception as e2:
+                    return jsonify({
+                        'error': f'Both retrieval and LLM failed: {str(e2)}'
+                    }), 500
             
     except Exception as e:
         error_msg = str(e)

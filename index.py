@@ -14,6 +14,8 @@ from llama_index.core import (
     load_index_from_storage,
 )
 from llama_index.core.schema import TextNode
+from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.vector_stores import SimpleVectorStore
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.llms.ollama import Ollama
@@ -60,11 +62,16 @@ class TaxCodeRAG:
         # Load or build index
         self.index = self._load_or_build_index()
         
+        # Create custom retriever with better configuration
+        self.retriever = VectorIndexRetriever(
+            index=self.index,
+            similarity_top_k=20,  # Retrieve more candidates initially
+        )
+        
+        # Create query engine directly from retriever (avoids conflict with as_query_engine)
         # Use "default" response mode (faster, single LLM call) instead of "compact" (multiple calls)
-        # The embedding search itself is fast - it's just cosine similarity on pre-computed vectors
-        # Valid modes: "default", "compact", "tree_summarize", "refine", "simple_summarize"
-        self.query_engine = self.index.as_query_engine(
-            similarity_top_k=10,
+        self.query_engine = RetrieverQueryEngine.from_args(
+            retriever=self.retriever,
         )
     
     def _load_chunks(self) -> List[Dict]:
@@ -153,7 +160,84 @@ class TaxCodeRAG:
             print("No existing index found. Building new index...")
             return self._build_index()
     
-    def query(self, question: str, include_sources: bool = True, retrieve_only: bool = False) -> Dict:
+    def _expand_query(self, question: str) -> str:
+        """
+        Expand/rewrite the query to improve retrieval.
+        Uses LLM to generate a better search query with related terms.
+        """
+        expansion_prompt = f"""You are helping to improve a search query for finding information in the US Tax Code (Title 26).
+
+        Original question: {question}
+
+        Generate an improved search query that:
+        1. Includes key tax code terminology (e.g., "taxable income", "filing status", "tax brackets", "standard deduction")
+        2. Expands abbreviations (e.g., "MFS" -> "married filing separately")
+        3. Adds related terms (e.g., "tax rate" for "how much am I taxed")
+        4. Keeps the core intent of the question
+
+        Return ONLY the improved search query, nothing else:"""
+
+        try:
+            expanded = Settings.llm.complete(expansion_prompt).text.strip()
+            print(f"Original query: {question}")
+            print(f"Expanded query: {expanded}")
+            return expanded
+        except Exception as e:
+            print(f"Query expansion failed: {e}. Using original query.")
+            return question
+    
+    def _retrieve_with_metadata_filtering(
+        self, 
+        query: str, 
+        top_k: int = 20,
+        filter_sections: Optional[List[str]] = None
+    ) -> List:
+        """
+        Retrieve chunks with optional metadata filtering.
+        
+        Args:
+            query: Search query
+            top_k: Number of chunks to retrieve
+            filter_sections: Optional list of section numbers to prioritize (e.g., ["1", "2"])
+        """
+        # Retrieve more candidates
+        nodes = self.retriever.retrieve(query)
+        
+        # If we have section filters, boost those sections
+        if filter_sections:
+            filtered_nodes = []
+            other_nodes = []
+            
+            for node in nodes:
+                metadata = node.metadata if hasattr(node, 'metadata') else {}
+                identifier = metadata.get('identifier', '')
+                
+                # Check if this node's section matches any filter
+                matches = any(
+                    identifier.startswith(sec) or sec in identifier 
+                    for sec in filter_sections
+                )
+                
+                if matches:
+                    filtered_nodes.append(node)
+                else:
+                    other_nodes.append(node)
+            
+            # Prioritize filtered nodes, then add others
+            nodes = filtered_nodes[:top_k] + other_nodes[:top_k - len(filtered_nodes)]
+        else:
+            nodes = nodes[:top_k]
+        
+        return nodes
+    
+    def query(
+        self, 
+        question: str, 
+        include_sources: bool = True, 
+        retrieve_only: bool = False,
+        expand_query: bool = True,
+        top_k: int = 10
+    ) -> Dict:
         """
         Query the tax code.
         
@@ -161,18 +245,24 @@ class TaxCodeRAG:
             question: User's question about the tax code
             include_sources: Whether to include source citations
             retrieve_only: If True, only retrieve relevant chunks without LLM generation (faster for testing)
+            expand_query: Whether to expand/rewrite the query using LLM (default: True)
+            top_k: Number of chunks to retrieve (default: 10)
             
         Returns:
             Dictionary with 'answer' and optionally 'sources'
         """
         print(f"\nQuery: {question}")
         
+        # Expand/rewrite query for better retrieval
+        search_query = question
+        if expand_query:
+            search_query = self._expand_query(question)
+        
         if retrieve_only:
             # Just retrieve relevant chunks without LLM generation (fast - just embedding search)
             import time
             start = time.time()
-            retriever = self.index.as_retriever(similarity_top_k=5)
-            nodes = retriever.retrieve(question)
+            nodes = self._retrieve_with_metadata_filtering(search_query, top_k=top_k)
             elapsed = time.time() - start
             print(f"✓ Embedding search completed in {elapsed:.3f} seconds (this is fast!)")
             return {
@@ -192,9 +282,8 @@ class TaxCodeRAG:
         import time
         start = time.time()
         
-        # First, do the fast embedding search
-        retriever = self.index.as_retriever(similarity_top_k=5)
-        retrieved_nodes = retriever.retrieve(question)
+        # First, do the fast embedding search with expanded query
+        retrieved_nodes = self._retrieve_with_metadata_filtering(search_query, top_k=top_k)
         retrieval_time = time.time() - start
         print(f"\n✓ Retrieved {len(retrieved_nodes)} relevant chunks in {retrieval_time:.3f}s (embedding search)")
         print("\n" + "="*80)
@@ -217,10 +306,11 @@ class TaxCodeRAG:
                 print(f"    (Full text length: {len(node.text)} chars)")
         print("="*80)
         
-        # Then generate answer with LLM (this can be slow and cause timeouts)
+        # Then generate answer with LLM using expanded query (this can be slow and cause timeouts)
         print("\nGenerating answer with LLM (this may take a while)...")
         try:
-            response = self.query_engine.query(question)
+            # Use the expanded query for better context
+            response = self.query_engine.query(search_query)
             
             total_time = time.time() - start
             llm_time = total_time - retrieval_time
@@ -276,8 +366,12 @@ class TaxCodeRAG:
             shutil.rmtree(self.index_dir)
         # Build new index
         self.index = self._build_index()
-        self.query_engine = self.index.as_query_engine(
-            similarity_top_k=5,
+        self.retriever = VectorIndexRetriever(
+            index=self.index,
+            similarity_top_k=20,
+        )
+        self.query_engine = RetrieverQueryEngine.from_args(
+            retriever=self.retriever,
         )
         print("Index rebuilt successfully")
 
