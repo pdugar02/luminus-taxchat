@@ -55,7 +55,7 @@ def query():
             for source in result.get('sources', []):
                 chunks.append({
                     'id': source.get('id'),
-                    'text': source.get('text_preview', ''),
+                    'text': source.get('text', source.get('text_preview', '')),  # Use full text, fallback to preview
                     'score': source.get('score'),
                     'metadata': source.get('metadata', {})
                 })
@@ -80,7 +80,7 @@ def query():
                 for source in result.get('sources', []):
                     chunks.append({
                         'id': source.get('id'),
-                        'text': source.get('text_preview', ''),
+                        'text': source.get('text', source.get('text_preview', '')),  # Use full text, fallback to preview
                         'score': source.get('score'),
                         'metadata': source.get('metadata', {})
                     })
@@ -103,7 +103,7 @@ def query():
                     for source in retrieve_result.get('sources', []):
                         chunks.append({
                             'id': source.get('id'),
-                            'text': source.get('text_preview', ''),
+                            'text': source.get('text', source.get('text_preview', '')),  # Use full text, fallback to preview
                             'score': source.get('score'),
                             'metadata': source.get('metadata', {})
                         })

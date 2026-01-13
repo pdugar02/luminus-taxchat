@@ -153,6 +153,70 @@
             line-height: 1.5;
         }
 
+        .chunk-text-preview {
+            font-size: 13px;
+            color: #333;
+            line-height: 1.5;
+        }
+
+        .chunk-text-full {
+            font-size: 13px;
+            color: #333;
+            line-height: 1.5;
+            display: none;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .chunk-text-full.expanded {
+            display: block;
+        }
+
+        .chunk-expand-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 8px;
+            padding: 6px 12px;
+            background: #f0f4ff;
+            border: 1px solid #667eea;
+            border-radius: 6px;
+            color: #667eea;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            user-select: none;
+        }
+
+        .chunk-expand-btn:hover {
+            background: #e0e8ff;
+            transform: translateY(-1px);
+        }
+
+        .chunk-expand-btn.expanded {
+            background: #667eea;
+            color: white;
+        }
+
+        .chunk-expand-btn.expanded:hover {
+            background: #5568d3;
+        }
+
+        .expand-arrow {
+            display: inline-block;
+            width: 0;
+            height: 0;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid currentColor;
+            transition: transform 0.2s;
+        }
+
+        .chunk-expand-btn.expanded .expand-arrow {
+            transform: rotate(180deg);
+        }
+
         .loading {
             display: inline-block;
             padding: 12px 16px;
@@ -339,6 +403,7 @@
 
     <script>
         let retrieveOnly = false;
+        let chunkCounter = 0; // Global counter for unique chunk IDs
 
         function toggleRetrieve() {
             retrieveOnly = !retrieveOnly;
@@ -469,19 +534,37 @@
                 chunks.forEach((chunk, idx) => {
                     const chunkDiv = document.createElement('div');
                     chunkDiv.className = 'chunk';
+                    const uniqueChunkId = chunkCounter++;
+                    chunkDiv.id = `chunk-${uniqueChunkId}`;
+                    
+                    const previewLength = 200;
+                    const hasMoreText = chunk.text.length > previewLength;
+                    const previewText = hasMoreText ? chunk.text.substring(0, previewLength) : chunk.text;
                     
                     let html = '<div class="chunk-header">';
-                    html += `<span class="chunk-id">[${idx + 1}] §${chunk.metadata.identifier} | ${chunk.metadata.tag}</span>`;
+                    html += `<span class="chunk-id">[${idx + 1}] §${chunk.metadata.identifier || 'null'} | ${chunk.metadata.tag || 'null'}</span>`;
                     if (chunk.score) {
-                        html += `<span class="chunk-score">Score: ${chunk.score}</span>`;
+                        html += `<span class="chunk-score">Score: ${chunk.score.toFixed(3)}</span>`;
                     }
                     html += '</div>';
                     
-                    if (chunk.metadata.heading && chunk.metadata.heading !== 'N/A') {
-                        html += `<div class="chunk-heading">${chunk.metadata.heading}</div>`;
+                    if (chunk.metadata.heading && chunk.metadata.heading !== 'N/A' && chunk.metadata.heading !== null) {
+                        html += `<div class="chunk-heading">${escapeHtml(chunk.metadata.heading)}</div>`;
                     }
                     
-                    html += `<div class="chunk-text">${escapeHtml(chunk.text.substring(0, 300))}${chunk.text.length > 300 ? '...' : ''}</div>`;
+                    // Preview text
+                    html += `<div class="chunk-text-preview">${escapeHtml(previewText)}${hasMoreText ? '...' : ''}</div>`;
+                    
+                    // Full text (hidden by default)
+                    html += `<div class="chunk-text-full" id="chunk-full-${uniqueChunkId}">${escapeHtml(chunk.text)}</div>`;
+                    
+                    // Expand button (only show if there's more text)
+                    if (hasMoreText) {
+                        html += `<div class="chunk-expand-btn" onclick="toggleChunk(${uniqueChunkId})" id="chunk-btn-${uniqueChunkId}">`;
+                        html += '<span class="expand-arrow"></span>';
+                        html += '<span class="expand-text">Show full text</span>';
+                        html += '</div>';
+                    }
                     
                     chunkDiv.innerHTML = html;
                     chunksSection.appendChild(chunkDiv);
@@ -540,6 +623,27 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        function toggleChunk(uniqueId) {
+            const fullTextDiv = document.getElementById(`chunk-full-${uniqueId}`);
+            const expandBtn = document.getElementById(`chunk-btn-${uniqueId}`);
+            
+            if (!fullTextDiv || !expandBtn) return;
+            
+            const expandText = expandBtn.querySelector('.expand-text');
+            
+            if (fullTextDiv.classList.contains('expanded')) {
+                // Collapse
+                fullTextDiv.classList.remove('expanded');
+                expandBtn.classList.remove('expanded');
+                expandText.textContent = 'Show full text';
+            } else {
+                // Expand
+                fullTextDiv.classList.add('expanded');
+                expandBtn.classList.add('expanded');
+                expandText.textContent = 'Hide full text';
+            }
         }
 
         // Focus input on load

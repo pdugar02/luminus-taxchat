@@ -270,6 +270,7 @@ class TaxCodeRAG:
                 'sources': [
                     {
                         'id': node.node_id,
+                        'text': node.text,  # Full text
                         'text_preview': node.text[:300] + '...' if len(node.text) > 300 else node.text,
                         'metadata': node.metadata if hasattr(node, 'metadata') else {},
                         'score': getattr(node, 'score', None)
@@ -324,6 +325,7 @@ class TaxCodeRAG:
                 'sources': [
                     {
                         'id': node.node_id,
+                        'text': node.text,  # Full text
                         'text_preview': node.text[:300] + '...' if len(node.text) > 300 else node.text,
                         'score': getattr(node, 'score', None),
                         'metadata': node.metadata if hasattr(node, 'metadata') else {}
@@ -343,6 +345,7 @@ class TaxCodeRAG:
             for node in response.source_nodes[:5]:  # Top 5 sources
                 source_info = {
                     'id': node.node_id,
+                    'text': node.text,  # Full text
                     'text_preview': node.text[:200] + '...' if len(node.text) > 200 else node.text,
                 }
                 # Add metadata if available
