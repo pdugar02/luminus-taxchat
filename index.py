@@ -43,7 +43,7 @@ class TaxCodeRAG:
                             Use the exact model name you pulled, including tags like :8b
             ollama_base_url: Ollama server URL
         """
-        self.chunks_path = chunks_path or Path(__file__).parent / "data" / "rag_chunks.json"
+        self.chunks_path = chunks_path or Path(__file__).parent / "data" / "rag_chunks2.json"
         self.index_dir = index_dir or Path(__file__).parent / "data" / "index"
         self.ollama_model = ollama_model
         self.ollama_base_url = ollama_base_url
