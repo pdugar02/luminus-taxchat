@@ -12,11 +12,35 @@ app = Flask(__name__)
 print("Initializing RAG system...")
 rag = None
 
-def get_rag():
-    """Lazy initialization of RAG system."""
+def get_rag(index_name: str = None, chunks_file: str = None):
+    """
+    Lazy initialization of RAG system.
+    
+    Args:
+        index_name: Name of the index to use (e.g., 'rag_chunks2' for index_rag_chunks2)
+                    If None, uses default from chunks_file or rag_chunks2.json
+        chunks_file: Path to chunks file (only used if index doesn't exist and needs building)
+    """
     global rag
     if rag is None:
-        rag = TaxCodeRAG()
+        from pathlib import Path
+        
+        # Determine index directory
+        if index_name:
+            index_dir = Path(__file__).parent / "data" / f"index_{index_name}"
+        elif chunks_file:
+            # Derive from chunks filename
+            chunks_path = Path(chunks_file)
+            index_dir = Path(__file__).parent / "data" / f"index_{chunks_path.stem}"
+        else:
+            # Default: use rag_chunks2
+            index_dir = Path(__file__).parent / "data" / "index_rag_chunks2"
+            chunks_file = str(Path(__file__).parent / "data" / "rag_chunks2.json")
+        
+        rag = TaxCodeRAG(
+            chunks_path=chunks_file,
+            index_dir=str(index_dir)
+        )
     return rag
 
 @app.route('/')
@@ -140,17 +164,39 @@ def health():
 
 if __name__ == '__main__':
     import sys
-    # Use port 5001 by default (5000 is often used by AirPlay on macOS)
+    import os
+    
+    # Check for index name from environment variable or command line
+    index_name = os.getenv('RAG_INDEX_NAME', None)
+    chunks_file = os.getenv('RAG_CHUNKS_FILE', None)
+    
+    # Parse command line arguments
     port = 5001
-    if len(sys.argv) > 1:
-        try:
-            port = int(sys.argv[1])
-        except ValueError:
-            print(f"Invalid port number: {sys.argv[1]}. Using default port 5001.")
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg == '--index-name' and i + 1 < len(sys.argv):
+            index_name = sys.argv[i + 1]
+        elif arg == '--chunks-file' and i + 1 < len(sys.argv):
+            chunks_file = sys.argv[i + 1]
+        elif arg == '--port' and i + 1 < len(sys.argv):
+            port = int(sys.argv[i + 1])
+        elif arg.isdigit():
+            # Legacy: port as first positional argument
+            port = int(arg)
+    
+    # Initialize RAG with specified index
+    if index_name or chunks_file:
+        print(f"\nUsing index: {index_name or 'from chunks file'}")
+        get_rag(index_name=index_name, chunks_file=chunks_file)
     
     print("\n" + "="*80)
     print("Starting Flask server...")
+    if index_name:
+        print(f"Using index: {index_name}")
     print(f"Open http://localhost:{port} in your browser")
+    print("="*80 + "\n")
+    print("Usage:")
+    print("  python app.py --index-name <name> --port <port>")
+    print("  RAG_INDEX_NAME=<name> python app.py")
     print("="*80 + "\n")
     app.run(debug=True, host='0.0.0.0', port=port)
 

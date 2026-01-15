@@ -2,6 +2,7 @@
 Structure-first chunking utilities for tax code / legal authority RAG.
 Chunks by legal boundaries (paragraph/subparagraph) first, then adjusts by token count.
 Uses tiktoken for accurate token counting.
+Target: 300-700 tokens per chunk (sweet spot)
 """
 
 from typing import List, Dict, Optional, Tuple
@@ -18,9 +19,9 @@ class ContiguousChunk:
     parent_id: Optional[str] = None
     children_ids: List[str] = field(default_factory=list)
     metadata: Dict = field(default_factory=dict)
-    chunk_index: Optional[int] = None  # For chunks split from same parent
-    start_char: Optional[int] = None  # Character position in original text
-    end_char: Optional[int] = None  # Character position in original text
+    chunk_index: Optional[int] = None
+    start_char: Optional[int] = None
+    end_char: Optional[int] = None
 
 
 class StructureFirstChunker:
@@ -32,24 +33,24 @@ class StructureFirstChunker:
     
     def __init__(
         self,
-        target_tokens: int = 500,  # Sweet spot: 300-700, default to middle
+        target_tokens: int = 500,
         min_tokens: int = 300,
         max_tokens: int = 700,
-        split_threshold: int = 1000,  # Split if >1000 tokens
-        merge_threshold: int = 150,  # Merge if <150 tokens
-        chunk_overlap: int = 50,  # 0-80 tokens overlap
-        model: str = "gpt-4"  # Model for tiktoken encoding
+        split_threshold: int = 700,  # Split if >700 tokens (not 1000!)
+        merge_threshold: int = 150,
+        chunk_overlap: int = 50,
+        model: str = "gpt-4"
     ):
         """
         Initialize chunker.
         
         Args:
-            target_tokens: Target token count for chunks (default: 500, sweet spot 300-700)
+            target_tokens: Target token count (default: 500)
             min_tokens: Minimum tokens before merging (default: 300)
             max_tokens: Maximum tokens before splitting (default: 700)
-            split_threshold: Split chunks larger than this (default: 1000)
+            split_threshold: Split chunks larger than this (default: 700)
             merge_threshold: Merge chunks smaller than this (default: 150)
-            chunk_overlap: Overlap between chunks in tokens (default: 50, range 0-80)
+            chunk_overlap: Overlap between chunks in tokens (default: 50)
             model: Model name for tiktoken encoding (default: "gpt-4")
         """
         self.target_tokens = target_tokens
@@ -63,40 +64,61 @@ class StructureFirstChunker:
         try:
             self.encoder = tiktoken.encoding_for_model(model)
         except KeyError:
-            # Fallback to cl100k_base (used by GPT-4)
             self.encoder = tiktoken.get_encoding("cl100k_base")
     
     def count_tokens(self, text: str) -> int:
         """Count tokens in text using tiktoken."""
         return len(self.encoder.encode(text))
     
-    def _find_legal_subitem_boundaries(self, text: str) -> List[Tuple[int, str]]:
+    def _clean_text(self, text: str) -> str:
         """
-        Find legal sub-item boundaries like (A), (B), (C) or (i), (ii), (iii).
-        Returns list of (position, label) tuples.
+        Clean text by removing unnecessary whitespace and normalizing.
+        
+        Args:
+            text: Raw text to clean
+            
+        Returns:
+            Cleaned text
+        """
+        if not text:
+            return ""
+        
+        # Normalize whitespace (multiple spaces/newlines to single)
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove leading/trailing whitespace
+        text = text.strip()
+        
+        # Remove excessive punctuation (e.g., multiple periods)
+        text = re.sub(r'\.{3,}', '...', text)
+        
+        return text
+    
+    def _find_legal_boundaries(self, text: str) -> List[Tuple[int, str]]:
+        """
+        Find legal sub-item boundaries like (A), (B), (C), (i), (ii), (a)(1), etc.
+        Returns list of (position, label) tuples sorted by position.
         """
         boundaries = []
         
-        # Pattern for sub-items: (A), (B), (C), etc. or (i), (ii), (iii), etc.
-        # Also matches (1), (2), (3) as sub-items
+        # Patterns for legal boundaries (in order of specificity)
         patterns = [
-            r'\(([A-Z])\)',  # (A), (B), (C)
-            r'\(([ivxlcdm]+)\)',  # (i), (ii), (iii) - roman numerals
-            r'\(([IVXLCDM]+)\)',  # (I), (II), (III) - uppercase roman
-            r'\((\d+)\)',  # (1), (2), (3) - numbers
+            (r'\(([a-z])\)\((\d+)\)', 'subpara'),  # (a)(1), (a)(2) - most specific
+            (r'\(([A-Z])\)', 'subitem'),  # (A), (B), (C)
+            (r'\(([ivxlcdm]+)\)', 'roman_lower'),  # (i), (ii), (iii)
+            (r'\(([IVXLCDM]+)\)', 'roman_upper'),  # (I), (II), (III)
+            (r'\((\d+)\)', 'number'),  # (1), (2), (3)
+            (r'\(([a-z])\)(?!\()', 'paragraph'),  # (a), (b) - standalone
         ]
         
-        for pattern in patterns:
-            for match in re.finditer(pattern, text):
-                # Position at the start of the sub-item marker
+        for pattern, label_type in patterns:
+            for match in re.finditer(pattern, text, re.MULTILINE):
                 pos = match.start()
                 label = match.group(0)
-                boundaries.append((pos, label))
+                boundaries.append((pos, f"{label_type}:{label}"))
         
-        # Sort by position
+        # Sort by position and remove duplicates
         boundaries.sort(key=lambda x: x[0])
-        
-        # Remove duplicates (same position)
         unique_boundaries = []
         seen_positions = set()
         for pos, label in boundaries:
@@ -106,40 +128,23 @@ class StructureFirstChunker:
         
         return unique_boundaries
     
-    def _find_subparagraph_boundaries(self, text: str) -> List[int]:
+    def _split_large_chunk(self, text: str, chunk_id: str, metadata: Dict, depth: int = 0) -> List[ContiguousChunk]:
         """
-        Find subparagraph boundaries like (a)(1), (a)(2), etc.
-        Returns list of character positions.
+        Split a large chunk (>split_threshold tokens) by legal boundaries.
+        Ensures resulting chunks are within max_tokens limit.
+        
+        Args:
+            text: Text to split
+            chunk_id: ID for the chunk
+            metadata: Metadata dictionary
+            depth: Recursion depth (prevents infinite recursion)
         """
-        boundaries = []
+        MAX_RECURSION_DEPTH = 5
         
-        # Pattern for subparagraphs: (a)(1), (a)(2), (b)(1), etc.
-        # Look for patterns like (letter)(number) that appear at start of line or after space
-        pattern = r'(?:^|\s)\(([a-z])\)\((\d+)\)'
-        
-        for match in re.finditer(pattern, text, re.MULTILINE):
-            # Position at the start of the subparagraph marker
-            pos = match.start()
-            boundaries.append(pos)
-        
-        # Also look for standalone paragraph markers like (a), (b), (c)
-        pattern2 = r'(?:^|\s)\(([a-z])\)(?!\()'
-        for match in re.finditer(pattern2, text, re.MULTILINE):
-            pos = match.start()
-            if pos not in boundaries:
-                boundaries.append(pos)
-        
-        boundaries.sort()
-        return boundaries
-    
-    def _split_by_subitems(self, text: str, chunk_id: str, metadata: Dict) -> List[ContiguousChunk]:
-        """
-        Split a large chunk (>split_threshold tokens) by sub-items.
-        Returns list of chunks split at sub-item boundaries.
-        """
+        text = self._clean_text(text)
         token_count = self.count_tokens(text)
         
-        # If not large enough to split, return as single chunk
+        # If within limits, return as single chunk
         if token_count <= self.split_threshold:
             return [ContiguousChunk(
                 id=chunk_id,
@@ -150,26 +155,63 @@ class StructureFirstChunker:
                 end_char=len(text)
             )]
         
-        # Find sub-item boundaries
-        subitem_boundaries = self._find_legal_subitem_boundaries(text)
+        # Prevent infinite recursion - if we've recursed too deep, force split by characters
+        if depth >= MAX_RECURSION_DEPTH:
+            # Fallback: split by approximate character count
+            # Estimate chars per token (roughly 4 chars per token for English)
+            chars_per_token = 4
+            target_chars = self.max_tokens * chars_per_token
+            chunks = []
+            chunk_index = 0
+            start = 0
+            
+            while start < len(text):
+                end = min(start + target_chars, len(text))
+                # Try to break at sentence boundary
+                if end < len(text):
+                    # Look for sentence boundary near the end
+                    for i in range(end, max(start, end - 200), -1):
+                        if text[i] in '.!?':
+                            end = i + 1
+                            break
+                
+                chunk_text = text[start:end].strip()
+                if chunk_text:
+                    chunk = ContiguousChunk(
+                        id=f"{chunk_id}_part_{chunk_index}",
+                        text=chunk_text,
+                        metadata=metadata.copy(),
+                        chunk_index=chunk_index,
+                        start_char=start,
+                        end_char=end
+                    )
+                    chunks.append(chunk)
+                    chunk_index += 1
+                
+                start = end
+            
+            return chunks if chunks else [ContiguousChunk(
+                id=chunk_id,
+                text=text[:target_chars],  # Truncate if we can't split
+                metadata=metadata,
+                chunk_index=None,
+                start_char=0,
+                end_char=min(target_chars, len(text))
+            )]
         
-        # If no sub-item boundaries found, try subparagraph boundaries
-        if not subitem_boundaries:
-            subpara_boundaries = self._find_subparagraph_boundaries(text)
-            if subpara_boundaries:
-                # Convert to (pos, label) format
-                subitem_boundaries = [(pos, f"subpara_{i}") for i, pos in enumerate(subpara_boundaries)]
+        # Find legal boundaries
+        boundaries = self._find_legal_boundaries(text)
         
-        # If still no boundaries, try sentence boundaries as last resort
-        if not subitem_boundaries:
-            # Find sentence boundaries
-            pattern = r'[.!?]+(?:\s+|$)'
-            for match in re.finditer(pattern, text):
-                pos = match.end()
-                subitem_boundaries.append((pos, f"sentence_{len(subitem_boundaries)}"))
+        # If no boundaries found, try sentence boundaries
+        if not boundaries:
+            for match in re.finditer(r'[.!?]+\s+', text):
+                boundaries.append((match.end(), f"sentence:{match.end()}"))
         
-        if not subitem_boundaries:
-            # Can't split, return as single chunk
+        if not boundaries:
+            # Can't split meaningfully - if too large, force character-based split
+            if token_count > self.max_tokens:
+                return self._split_large_chunk(text, chunk_id, metadata, depth + 1)
+            # Otherwise return as single chunk (will be truncated later if needed)
             return [ContiguousChunk(
                 id=chunk_id,
                 text=text,
@@ -179,27 +221,37 @@ class StructureFirstChunker:
                 end_char=len(text)
             )]
         
-        # Split at boundaries, ensuring each chunk is within reasonable size
+        # Split at boundaries, ensuring each chunk is within max_tokens
         chunks = []
         start = 0
         chunk_index = 0
         
-        for i, (boundary_pos, label) in enumerate(subitem_boundaries):
-            # Extract chunk from start to boundary
+        for i, (boundary_pos, label) in enumerate(boundaries):
             chunk_text = text[start:boundary_pos].strip()
             
-            if chunk_text:
-                chunk_tokens = self.count_tokens(chunk_text)
-                
-                # If chunk is still too large, try to split further
-                if chunk_tokens > self.split_threshold and i < len(subitem_boundaries) - 1:
-                    # Try to find more granular boundaries within this chunk
-                    # For now, just create the chunk and let it be large
-                    pass
-                
-                chunk_id_use = chunk_id if chunk_index == 0 else f"{chunk_id}_part_{chunk_index}"
+            if not chunk_text:
+                start = boundary_pos
+                continue
+            
+            chunk_tokens = self.count_tokens(chunk_text)
+            
+            # If this chunk is still too large, split it further (with recursion limit)
+            if chunk_tokens > self.max_tokens:
+                # Recursively split this sub-chunk
+                sub_chunks = self._split_large_chunk(
+                    chunk_text,
+                    f"{chunk_id}_part_{chunk_index}",
+                    metadata.copy(),
+                    depth + 1
+                )
+                for sub_chunk in sub_chunks:
+                    sub_chunk.chunk_index = chunk_index
+                    chunks.append(sub_chunk)
+                    chunk_index += 1
+            else:
+                # Chunk is within limits
                 chunk = ContiguousChunk(
-                    id=chunk_id_use,
+                    id=chunk_id if chunk_index == 0 else f"{chunk_id}_part_{chunk_index}",
                     text=chunk_text,
                     metadata=metadata.copy(),
                     chunk_index=chunk_index if chunk_index > 0 else None,
@@ -211,20 +263,33 @@ class StructureFirstChunker:
             
             start = boundary_pos
         
-        # Add final chunk from last boundary to end
+        # Add final chunk
         if start < len(text):
-            chunk_text = text[start:].strip()
-            if chunk_text:
-                chunk_id_use = chunk_id if chunk_index == 0 else f"{chunk_id}_part_{chunk_index}"
-                chunk = ContiguousChunk(
-                    id=chunk_id_use,
-                    text=chunk_text,
-                    metadata=metadata.copy(),
-                    chunk_index=chunk_index if chunk_index > 0 else None,
-                    start_char=start,
-                    end_char=len(text)
-                )
-                chunks.append(chunk)
+            final_text = text[start:].strip()
+            if final_text:
+                final_tokens = self.count_tokens(final_text)
+                if final_tokens > self.max_tokens:
+                    # Split final chunk too (with recursion limit)
+                    sub_chunks = self._split_large_chunk(
+                        final_text,
+                        f"{chunk_id}_part_{chunk_index}",
+                        metadata.copy(),
+                        depth + 1
+                    )
+                    for sub_chunk in sub_chunks:
+                        sub_chunk.chunk_index = chunk_index
+                        chunks.append(sub_chunk)
+                        chunk_index += 1
+                else:
+                    chunk = ContiguousChunk(
+                        id=f"{chunk_id}_part_{chunk_index}" if chunk_index > 0 else chunk_id,
+                        text=final_text,
+                        metadata=metadata.copy(),
+                        chunk_index=chunk_index if chunk_index > 0 else None,
+                        start_char=start,
+                        end_char=len(text)
+                    )
+                    chunks.append(chunk)
         
         return chunks if chunks else [ContiguousChunk(
             id=chunk_id,
@@ -241,9 +306,9 @@ class StructureFirstChunker:
         start_idx: int
     ) -> Tuple[List[ContiguousChunk], int]:
         """
-        Merge small chunks (<merge_threshold tokens) with next siblings until reaching target size.
-        Only merges chunks that are siblings (same parent_id).
-        Returns (merged_chunks, next_index).
+        Merge small chunks (<merge_threshold tokens) with next siblings.
+        Only merges if same parent and element type.
+        Ensures merged chunk doesn't exceed max_tokens.
         """
         if start_idx >= len(chunks):
             return [], start_idx
@@ -256,40 +321,34 @@ class StructureFirstChunker:
         if element_type not in ['paragraph', 'subparagraph']:
             return [], start_idx
         
-        merged_text_parts = []
+        merged_parts = []
         merged_metadata = first_chunk.get('metadata', {}).copy()
         total_tokens = 0
         current_idx = start_idx
         chunk_ids = []
         children_ids = []
         
-        # Start with first chunk
         while current_idx < len(chunks):
             chunk = chunks[current_idx]
             
-            # Only merge if same parent (siblings)
-            if chunk.get('parent_id') != parent_id:
+            # Only merge if same parent and element type
+            if chunk.get('parent_id') != parent_id or chunk.get('element_type', '') != element_type:
                 break
             
-            # Only merge if same element type
-            if chunk.get('element_type', '') != element_type:
-                break
-            
-            chunk_text = chunk.get('text', '')
+            chunk_text = self._clean_text(chunk.get('text', ''))
             chunk_tokens = self.count_tokens(chunk_text)
             
-            # If adding this chunk would exceed max_tokens, stop
+            # Stop if adding this would exceed max_tokens (and we already have min_tokens)
             if total_tokens + chunk_tokens > self.max_tokens and total_tokens >= self.min_tokens:
                 break
             
-            # Add this chunk
-            merged_text_parts.append(chunk_text)
+            merged_parts.append(chunk_text)
             total_tokens += chunk_tokens
             chunk_ids.append(chunk.get('id'))
             children_ids.extend(chunk.get('children_ids', []))
             current_idx += 1
             
-            # If we've reached target size, stop
+            # Stop if we've reached target size
             if total_tokens >= self.min_tokens:
                 break
         
@@ -297,15 +356,18 @@ class StructureFirstChunker:
         if current_idx <= start_idx + 1:
             return [], start_idx
         
-        # Combine text with newlines
-        merged_text = '\n\n'.join(merged_text_parts)
+        # Combine text with single newline (not double)
+        merged_text = '\n'.join(merged_parts)
+        merged_text = self._clean_text(merged_text)
         
-        # Use first chunk's ID as the merged chunk ID
-        merged_id = chunk_ids[0] if chunk_ids else first_chunk.get('id')
+        # Verify merged chunk is within limits
+        final_tokens = self.count_tokens(merged_text)
+        if final_tokens > self.max_tokens:
+            # Merged chunk is too large - split it
+            return self._split_large_chunk(merged_text, chunk_ids[0], merged_metadata), current_idx
         
-        # Create merged chunk
         merged_chunk = ContiguousChunk(
-            id=merged_id,
+            id=chunk_ids[0],
             text=merged_text,
             parent_id=parent_id,
             children_ids=children_ids,
@@ -320,35 +382,40 @@ class StructureFirstChunker:
     def chunk_with_relationships(
         self,
         chunks: List[Dict],
-        max_chunk_size: Optional[int] = None  # Deprecated, kept for compatibility
+        max_chunk_size: Optional[int] = None  # Deprecated
     ) -> List[ContiguousChunk]:
         """
         Process chunks using structure-first chunking strategy.
         
         Strategy:
-        1. Chunk by structure first (paragraph/subparagraph boundaries)
-        2. If <merge_threshold tokens, merge with next sibling until ~min_tokens
-        3. If >split_threshold tokens, split by sub-items
-        4. Target: 300-700 tokens per chunk
+        1. Clean text (remove unnecessary whitespace)
+        2. Chunk by structure first (paragraph/subparagraph boundaries)
+        3. If <merge_threshold tokens, merge with next sibling until ~min_tokens
+        4. If >split_threshold tokens, split by sub-items
+        5. Target: 300-700 tokens per chunk
         
         Args:
             chunks: List of chunk dictionaries from XML parser
-            max_chunk_size: Deprecated, kept for compatibility
+            max_chunk_size: Deprecated
             
         Returns:
             List of ContiguousChunk objects
         """
         result_chunks = []
-        chunk_id_map = {}  # Map original IDs to new chunk IDs
+        chunk_id_map = {}
         
         i = 0
         while i < len(chunks):
             chunk_dict = chunks[i]
             original_id = chunk_dict.get('id')
-            text = chunk_dict.get('text', '')
+            raw_text = chunk_dict.get('text', '')
+            
+            # Clean text first
+            text = self._clean_text(raw_text)
+            
             parent_id = chunk_dict.get('parent_id')
             children_ids = chunk_dict.get('children_ids', [])
-            metadata = chunk_dict.get('metadata', {})
+            metadata = chunk_dict.get('metadata', {}).copy()
             
             # Add element type and identifier to metadata
             metadata['tag'] = chunk_dict.get('element_type', '')
@@ -362,13 +429,11 @@ class StructureFirstChunker:
             # Strategy: chunk by structure first, size second
             if token_count < self.merge_threshold:
                 # Small chunk: try to merge with next siblings
-                # Only merge if it's a paragraph/subparagraph level element
                 if element_type in ['paragraph', 'subparagraph']:
                     merged_chunks, next_idx = self._merge_small_chunks(chunks, i)
                     if next_idx > i + 1:
-                        # Successfully merged multiple chunks
+                        # Successfully merged
                         result_chunks.extend(merged_chunks)
-                        # Update chunk_id_map for all merged chunks
                         for orig_chunk in chunks[i:next_idx]:
                             orig_id = orig_chunk.get('id')
                             chunk_id_map[orig_id] = [merged_chunks[0].id]
@@ -391,20 +456,18 @@ class StructureFirstChunker:
                 i += 1
                 
             elif token_count > self.split_threshold:
-                # Large chunk: split by sub-items
-                split_chunks = self._split_by_subitems(text, original_id, metadata)
+                # Large chunk: split by legal boundaries
+                split_chunks = self._split_large_chunk(text, original_id, metadata)
                 
                 if len(split_chunks) > 1:
                     # Successfully split
-                    # First chunk keeps the original ID and relationships
                     split_chunks[0].parent_id = parent_id
                     split_chunks[0].children_ids = children_ids.copy()
                     split_chunks[0].chunk_index = None
                     
-                    # Subsequent chunks get new IDs
                     new_ids = [original_id]
                     for j, split_chunk in enumerate(split_chunks[1:], 1):
-                        split_chunk.parent_id = original_id  # Parent is the first chunk
+                        split_chunk.parent_id = original_id
                         split_chunk.chunk_index = j
                         new_ids.append(split_chunk.id)
                     
@@ -428,7 +491,6 @@ class StructureFirstChunker:
                 
             else:
                 # Chunk is in good size range (merge_threshold to split_threshold)
-                # Keep as single chunk
                 new_chunk = ContiguousChunk(
                     id=original_id,
                     text=text,
@@ -446,14 +508,11 @@ class StructureFirstChunker:
         # Update parent/child relationships
         for chunk in result_chunks:
             if chunk.parent_id and chunk.parent_id in chunk_id_map:
-                # Update parent_id to first chunk of parent
                 chunk.parent_id = chunk_id_map[chunk.parent_id][0]
             
-            # Update children_ids
             updated_children = []
             for child_id in chunk.children_ids:
                 if child_id in chunk_id_map:
-                    # Add all chunks from the child
                     updated_children.extend(chunk_id_map[child_id])
                 else:
                     updated_children.append(child_id)
@@ -464,8 +523,8 @@ class StructureFirstChunker:
 
 def chunk_for_rag_contiguous(
     chunks: List[Dict], 
-    chunk_size: int = 500,  # Now in tokens, default 500 (sweet spot)
-    chunk_overlap: int = 50  # Now in tokens, default 50 (range 0-80)
+    chunk_size: int = 500,
+    chunk_overlap: int = 50
 ) -> List[Dict]:
     """
     Prepare chunks for RAG ingestion using structure-first chunking with token counting.
@@ -479,15 +538,15 @@ def chunk_for_rag_contiguous(
         List of dictionaries ready for RAG indexing
     """
     # Calculate min/max from target
-    min_tokens = max(300, int(chunk_size * 0.6))  # At least 300, or 60% of target
-    max_tokens = min(700, int(chunk_size * 1.4))  # At most 700, or 140% of target
+    min_tokens = max(300, int(chunk_size * 0.6))
+    max_tokens = min(700, int(chunk_size * 1.4))
     
     chunker = StructureFirstChunker(
         target_tokens=chunk_size,
         min_tokens=min_tokens,
         max_tokens=max_tokens,
-        split_threshold=1000,  # Split if >1000 tokens
-        merge_threshold=150,  # Merge if <150 tokens
+        split_threshold=max_tokens,  # Split if >max_tokens (not 1000!)
+        merge_threshold=150,
         chunk_overlap=chunk_overlap
     )
     
@@ -496,7 +555,6 @@ def chunk_for_rag_contiguous(
     # Convert to dictionaries
     rag_chunks = []
     for chunk in text_chunks:
-        # Count tokens for metadata
         token_count = chunker.count_tokens(chunk.text)
         
         rag_chunk = {
@@ -509,7 +567,7 @@ def chunk_for_rag_contiguous(
                 'chunk_index': chunk.chunk_index,
                 'start_char': chunk.start_char,
                 'end_char': chunk.end_char,
-                'token_count': token_count,  # Add token count to metadata
+                'token_count': token_count,
             }
         }
         rag_chunks.append(rag_chunk)

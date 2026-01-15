@@ -75,7 +75,26 @@ The project includes a RAG (Retrieval-Augmented Generation) system for querying 
 
 3. **Build the index:**
 
-   The first time you run the query system, it will automatically build an index from `data/rag_chunks.json`. This may take several minutes as it creates embeddings for all chunks.
+   You can build indexes independently using the `build_index.py` script:
+   
+   ```bash
+   # Build index from rag_chunks2.json (default)
+   python build_index.py data/rag_chunks2.json
+   
+   # Build with custom index name
+   python build_index.py data/rag_chunks2.json --index-name my_index
+   
+   # Build from different chunks file
+   python build_index.py data/rag_chunks.json --index-name rag_chunks
+   
+   # Force rebuild existing index
+   python build_index.py data/rag_chunks2.json --force
+   
+   # List all available indexes
+   python build_index.py --list
+   ```
+   
+   Indexes are stored in `data/index_<name>/` directories. The first time you run the app, it will automatically build an index if none exists, but it's recommended to build indexes explicitly using the build script.
 
 ### Usage
 
@@ -113,11 +132,51 @@ You can customize the system by modifying parameters in `index.py`:
 - `ollama_base_url`: Change Ollama server URL (default: "http://localhost:11434")
 - `similarity_top_k`: Number of chunks to retrieve (default: 5)
 
+### Using Multiple Indexes
+
+You can build multiple indexes from different chunk files and choose which one to use:
+
+**Build multiple indexes:**
+```bash
+# Build index from rag_chunks.json
+python build_index.py data/rag_chunks.json --index-name rag_chunks
+
+# Build index from rag_chunks2.json  
+python build_index.py data/rag_chunks2.json --index-name rag_chunks2
+```
+
+**Use a specific index in the app:**
+```bash
+# Via command line argument
+python app.py --index-name rag_chunks2
+
+# Via environment variable
+RAG_INDEX_NAME=rag_chunks2 python app.py
+
+# Or specify chunks file (will use index_<filename>)
+python app.py --chunks-file data/rag_chunks.json
+```
+
+**In code:**
+```python
+from app import get_rag
+
+# Use specific index
+rag = get_rag(index_name='rag_chunks2')
+
+# Or specify chunks file
+rag = get_rag(chunks_file='data/rag_chunks.json')
+```
+
 ### Rebuilding the Index
 
 If you update the chunks, rebuild the index:
 
-```python
+```bash
+# Using build script (recommended)
+python build_index.py data/rag_chunks2.json --force
+
+# Or programmatically
 from index import TaxCodeRAG
 rag = TaxCodeRAG()
 rag.rebuild_index()

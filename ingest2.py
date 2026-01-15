@@ -1,16 +1,16 @@
 """
-Alternative XML Parser using contiguous chunking with overlap.
-Uses chunk2.py for chunking that keeps contiguous text together.
+XML Parser using structure-first chunking with token-based sizing.
+Uses chunk2.py for chunking that respects legal boundaries and token limits.
 """
 
 import json
 import argparse
+import re
 from dataclasses import asdict
 from pathlib import Path
 from chunk2 import chunk_for_rag_contiguous
 
 # Import the XMLParser class from the original ingest.py
-# We'll reuse the same parsing logic
 import sys
 import importlib.util
 
@@ -23,6 +23,43 @@ spec.loader.exec_module(ingest_module)
 XMLParser = ingest_module.XMLParser
 
 
+def clean_chunk_text(chunk_dict: dict) -> dict:
+    """
+    Clean chunk text by removing unnecessary content.
+    
+    Removes:
+    - Repeated headings (if heading is in metadata, don't repeat in text)
+    - Excessive whitespace
+    - Redundant identifiers
+    """
+    text = chunk_dict.get('text', '')
+    metadata = chunk_dict.get('metadata', {})
+    heading = metadata.get('heading', '') or chunk_dict.get('identifier', '')
+    
+    # Remove heading from text if it appears at the start (redundant)
+    if heading and text.startswith(heading):
+        # Remove heading and any following colon/space
+        text = text[len(heading):].lstrip(': ').strip()
+    
+    # Remove section identifier if it appears redundantly
+    identifier = chunk_dict.get('identifier', '')
+    if identifier:
+        # Remove patterns like "§162" or "Section 162" from start of text
+        patterns = [
+            rf'§{re.escape(identifier)}\s*[:.]?\s*',
+            rf'Section\s+{re.escape(identifier)}\s*[:.]?\s*',
+        ]
+        for pattern in patterns:
+            text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # Update chunk with cleaned text
+    chunk_dict['text'] = text
+    return chunk_dict
+
+
 def main(chunk_size: int = 500, chunk_overlap: int = 50):
     """
     Main function to parse XML and extract chunks using structure-first chunking.
@@ -30,7 +67,6 @@ def main(chunk_size: int = 500, chunk_overlap: int = 50):
     Args:
         chunk_size: Target size for chunks (in tokens). Default is 500 (sweet spot 300-700).
         chunk_overlap: Overlap between chunks (in tokens). Default is 50 (range 0-80).
-                      Set to 0 to disable overlap.
     """
     data_dir = Path(__file__).parent / "data"
     xml_path = data_dir / "usc26.xml"
@@ -44,8 +80,13 @@ def main(chunk_size: int = 500, chunk_overlap: int = 50):
     # Save raw chunks
     parser.save_chunks(str(output_path))
     
-    # Convert to dictionaries for chunking
-    chunks_dict = [asdict(chunk) for chunk in chunks]
+    # Convert to dictionaries and clean text
+    chunks_dict = []
+    for chunk in chunks:
+        chunk_dict = asdict(chunk)
+        # Clean text to remove unnecessary content
+        chunk_dict = clean_chunk_text(chunk_dict)
+        chunks_dict.append(chunk_dict)
     
     # Apply structure-first chunking for RAG (with token counting)
     print(f"\nApplying structure-first chunking for RAG (chunk_size={chunk_size} tokens, chunk_overlap={chunk_overlap} tokens)...")
@@ -59,7 +100,7 @@ def main(chunk_size: int = 500, chunk_overlap: int = 50):
     # Print summary
     print("\n=== Parsing Summary ===")
     print(f"Total raw chunks: {len(chunks)}")
-    print(f"Total RAG chunks (contiguous with overlap): {len(rag_chunks)}")
+    print(f"Total RAG chunks: {len(rag_chunks)}")
     
     # Count by type
     type_counts = {}
@@ -80,7 +121,7 @@ def main(chunk_size: int = 500, chunk_overlap: int = 50):
         print(f"  Text length: {len(chunk.text)}")
         print(f"  Text preview: {chunk.text[:100]}...")
     
-    # Show sample RAG chunks
+    # Show sample RAG chunks with token statistics
     print("\n=== Sample RAG Chunks (Structure-First with Token Counting) ===")
     for i, chunk in enumerate(rag_chunks[:5]):
         print(f"\nRAG Chunk {i+1}:")
@@ -88,8 +129,6 @@ def main(chunk_size: int = 500, chunk_overlap: int = 50):
         token_count = chunk['metadata'].get('token_count', 'N/A')
         print(f"  Token count: {token_count}")
         print(f"  Text length: {len(chunk['text'])} chars")
-        if chunk['metadata'].get('start_char') is not None:
-            print(f"  Position: {chunk['metadata']['start_char']}-{chunk['metadata']['end_char']}")
         print(f"  Text preview: {chunk['text'][:100]}...")
     
     # Show token statistics
@@ -107,6 +146,15 @@ def main(chunk_size: int = 500, chunk_overlap: int = 50):
         # Count chunks in sweet spot (300-700 tokens)
         sweet_spot_count = sum(1 for tc in token_counts if 300 <= tc <= 700)
         print(f"Chunks in sweet spot (300-700 tokens): {sweet_spot_count} ({100*sweet_spot_count/len(token_counts):.1f}%)")
+        
+        # Count chunks that are too large (>700 tokens)
+        too_large = sum(1 for tc in token_counts if tc > 700)
+        if too_large > 0:
+            print(f"⚠️  Chunks exceeding 700 tokens: {too_large} ({100*too_large/len(token_counts):.1f}%)")
+        
+        # Count chunks that are too small (<300 tokens)
+        too_small = sum(1 for tc in token_counts if tc < 300)
+        print(f"Chunks below 300 tokens: {too_small} ({100*too_small/len(token_counts):.1f}%)")
 
 
 if __name__ == "__main__":
@@ -126,4 +174,3 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     main(chunk_size=args.chunk_size, chunk_overlap=args.chunk_overlap)
-
