@@ -653,90 +653,22 @@ def build_index_cmd(
     print("="*80)
 
 
-def query_cmd(question: str = None):
-    """Query the RAG system interactively or with a single question."""
-    # Check if Ollama is running
-    if not TaxCodeRAG.check_ollama():
-        print("Warning: Ollama may not be running. Make sure Ollama is installed and running.")
-        print("Install: https://ollama.ai")
-        print("Then run: ollama pull llama3.1")
-    
-    # Initialize RAG system
-    rag = TaxCodeRAG()
-    
-    if question:
-        # Single query from command line
-        result = rag.query(question)
-        print("\n" + "="*80)
-        print("ANSWER:")
-        print("="*80)
-        print(result['answer'])
-        if 'sources' in result:
-            print("\n" + "="*80)
-            print("SOURCES:")
-            print("="*80)
-            for i, source in enumerate(result['sources'], 1):
-                print(f"\n{i}. {source.get('metadata', {}).get('identifier', 'N/A')} - {source.get('metadata', {}).get('heading', 'N/A')}")
-                print(f"   Preview: {source['text_preview']}")
-    else:
-        # Interactive mode
-        print("\n" + "="*80)
-        print("Tax Code RAG System")
-        print("="*80)
-        print("Type your questions about the tax code. Type 'quit' or 'exit' to exit.\n")
-        
-        while True:
-            try:
-                question = input("\nQuestion: ").strip()
-                if question.lower() in ['quit', 'exit', 'q']:
-                    break
-                if not question:
-                    continue
-                
-                result = rag.query(question)
-                print("\n" + "="*80)
-                print("ANSWER:")
-                print("="*80)
-                print(result['answer'])
-                
-                if 'sources' in result:
-                    print("\n" + "="*80)
-                    print("SOURCES:")
-                    print("="*80)
-                    for i, source in enumerate(result['sources'], 1):
-                        meta = source.get('metadata', {})
-                        identifier = meta.get('identifier', 'N/A')
-                        heading = meta.get('heading', 'N/A')
-                        print(f"\n{i}. §{identifier} - {heading}")
-                        print(f"   Preview: {source['text_preview']}")
-            except KeyboardInterrupt:
-                print("\n\nExiting...")
-                break
-            except Exception as e:
-                print(f"\nError: {e}")
-                import traceback
-                traceback.print_exc()
-
-
 def main():
-    """Main function with subcommands for building indexes and querying."""
+    """Main function with subcommands for building and managing indexes."""
     import argparse
-    import sys
     
     parser = argparse.ArgumentParser(
-        description="Tax Code RAG System - Build indexes and query the tax code",
+        description="Tax Code RAG System - Build and manage vector indexes",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
         Examples:
-        python index.py query "What is the tax rate?"
+        python index.py build data/rag_chunks2.json
+        python index.py build data/rag_chunks2.json --index-name my_index --force
+        python index.py list
         """
     )
     
-    subparsers = parser.add_subparsers(dest='command', help='Command to run')
-    
-    # Query command
-    query_parser = subparsers.add_parser('query', help='Query the RAG system')
-    query_parser.add_argument('question', nargs='?', help='Question to ask (optional, will start interactive mode if not provided)')
+    subparsers = parser.add_subparsers(dest='command', help='Command to run', required=True)
     
     # Build command
     build_parser = subparsers.add_parser('build', help='Build a vector index from chunks')
@@ -751,18 +683,7 @@ def main():
     
     args = parser.parse_args()
     
-    # Handle legacy usage (no subcommand = query mode)
-    if not args.command:
-        # Legacy: if first arg looks like a question, treat as query
-        if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
-            query_cmd(' '.join(sys.argv[1:]))
-        else:
-            query_cmd()
-        return
-    
-    if args.command == 'query':
-        query_cmd(args.question)
-    elif args.command == 'build':
+    if args.command == 'build':
         build_index_cmd(
             chunks_file=args.chunks_file,
             index_name=args.index_name,

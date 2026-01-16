@@ -66,51 +66,70 @@ The project includes a RAG (Retrieval-Augmented Generation) system for querying 
 
 2. **Install and start Ollama:**
 
-   - Download from https://ollama.ai
+   - Download from <https://ollama.ai>
    - Pull the Llama 3.1 model:
+
      ```bash
      ollama pull llama3.1
      ```
+
    - Make sure Ollama is running (it should start automatically)
 
 3. **Build the index:**
 
-   You can build indexes independently using the `build_index.py` script:
-   
+   You can build indexes independently using the `index.py` script with the `build` subcommand:
+
    ```bash
-   # Build index from rag_chunks2.json (default)
-   python build_index.py data/rag_chunks2.json
+   # Build index from rag_chunks2.json
+   python index.py build data/rag_chunks2.json
    
    # Build with custom index name
-   python build_index.py data/rag_chunks2.json --index-name my_index
+   python index.py build data/rag_chunks2.json --index-name my_index
    
    # Build from different chunks file
-   python build_index.py data/rag_chunks.json --index-name rag_chunks
+   python index.py build data/rag_chunks.json --index-name rag_chunks
    
    # Force rebuild existing index
-   python build_index.py data/rag_chunks2.json --force
+   python index.py build data/rag_chunks2.json --force
    
    # List all available indexes
-   python build_index.py --list
+   python index.py list
    ```
-   
-   Indexes are stored in `data/index_<name>/` directories. The first time you run the app, it will automatically build an index if none exists, but it's recommended to build indexes explicitly using the build script.
 
-### Usage
+   Indexes are stored in `data/index_<name>/` directories. The first time you run the app, it will automatically build an index if none exists, but it's recommended to build indexes explicitly using the build command.
 
-**Interactive mode:**
+4. **Start the web application:**
+
+   ```bash
+   python app.py
+   ```
+
+   Then open your browser to <http://localhost:5000> to access the query interface.
+
+### Querying the RAG System
+
+The query interface is available through the web application (`app.py`). This provides a clean, user-friendly interface for asking questions about the tax code.
+
+**Start the app:**
 
 ```bash
-python index.py
+python app.py
 ```
 
-**Single query:**
+**Use a specific index:**
 
 ```bash
-python index.py "What is the tax rate for married couples filing jointly?"
+# Via command line argument
+python app.py --index-name rag_chunks2
+
+# Via environment variable
+RAG_INDEX_NAME=rag_chunks2 python app.py
+
+# Or specify chunks file (will use index_<filename>)
+python app.py --chunks-file data/rag_chunks.json
 ```
 
-### How It Works
+### RAG System Architecture
 
 1. **Indexing**: The system loads chunks from `data/rag_chunks.json` and creates embeddings using a HuggingFace model (BAAI/bge-small-en-v1.5 by default).
 
@@ -129,7 +148,7 @@ You can customize the system by modifying parameters in `index.py`:
 
 - `embedding_model`: Change the embedding model (default: "BAAI/bge-small-en-v1.5")
 - `ollama_model`: Change the Ollama model (default: "llama3.1")
-- `ollama_base_url`: Change Ollama server URL (default: "http://localhost:11434")
+- `ollama_base_url`: Change Ollama server URL (default: <http://localhost:11434>)
 - `similarity_top_k`: Number of chunks to retrieve (default: 5)
 
 ### Using Multiple Indexes
@@ -137,15 +156,17 @@ You can customize the system by modifying parameters in `index.py`:
 You can build multiple indexes from different chunk files and choose which one to use:
 
 **Build multiple indexes:**
+
 ```bash
 # Build index from rag_chunks.json
-python build_index.py data/rag_chunks.json --index-name rag_chunks
+python index.py build data/rag_chunks.json --index-name rag_chunks
 
 # Build index from rag_chunks2.json  
-python build_index.py data/rag_chunks2.json --index-name rag_chunks2
+python index.py build data/rag_chunks2.json --index-name rag_chunks2
 ```
 
 **Use a specific index in the app:**
+
 ```bash
 # Via command line argument
 python app.py --index-name rag_chunks2
@@ -158,6 +179,7 @@ python app.py --chunks-file data/rag_chunks.json
 ```
 
 **In code:**
+
 ```python
 from app import get_rag
 
@@ -173,8 +195,8 @@ rag = get_rag(chunks_file='data/rag_chunks.json')
 If you update the chunks, rebuild the index:
 
 ```bash
-# Using build script (recommended)
-python build_index.py data/rag_chunks2.json --force
+# Using build command (recommended)
+python index.py build data/rag_chunks2.json --force
 
 # Or programmatically
 from index import TaxCodeRAG
@@ -197,6 +219,7 @@ pip install -r requirements.txt
 ```
 
 Core dependencies:
+
 - `lxml`: XML parsing
 - `llama-index`: RAG framework
 - `llama-index-embeddings-huggingface`: Embeddings
