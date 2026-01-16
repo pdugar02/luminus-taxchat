@@ -412,6 +412,52 @@ class TaxCodeRAG:
             nodes = nodes[:top_k]
         
         return nodes
+
+    def _retrieve_multi_query(
+        self,
+        queries: List[str],
+        top_k: int = 10,
+        filter_sections: Optional[List[str]] = None
+    ) -> List:
+        """Retrieve and merge results across multiple queries."""
+        node_by_id = {}
+
+        for query in queries:
+            if not query:
+                continue
+            nodes = self._retrieve_with_metadata_filtering(
+                query,
+                top_k=top_k,
+                filter_sections=filter_sections
+            )
+            for node in nodes:
+                node_id = getattr(node, "node_id", None)
+                if not node_id:
+                    continue
+                existing = node_by_id.get(node_id)
+                if existing is None:
+                    node_by_id[node_id] = node
+                else:
+                    # Keep the node with the higher score if available
+                    existing_score = getattr(existing, "score", None)
+                    node_score = getattr(node, "score", None)
+                    if existing_score is None and node_score is not None:
+                        node_by_id[node_id] = node
+                    elif (
+                        existing_score is not None
+                        and node_score is not None
+                        and node_score > existing_score
+                    ):
+                        node_by_id[node_id] = node
+
+        merged_nodes = list(node_by_id.values())
+
+        def sort_key(n):
+            score = getattr(n, "score", None)
+            return score if score is not None else float("-inf")
+
+        merged_nodes.sort(key=sort_key, reverse=True)
+        return merged_nodes[:top_k]
     
     def query(
         self, 
@@ -419,7 +465,8 @@ class TaxCodeRAG:
         include_sources: bool = True, 
         retrieve_only: bool = False,
         expand_query: bool = True,
-        top_k: int = 10
+        top_k: int = 10,
+        search_queries: Optional[List[str]] = None
     ) -> Dict:
         """
         Query the tax code.
@@ -441,11 +488,17 @@ class TaxCodeRAG:
         if expand_query:
             search_query = self._expand_query(question)
         
+        # Determine which queries to use for retrieval
+        retrieval_queries = search_queries if search_queries else [search_query]
+
         if retrieve_only:
             # Just retrieve relevant chunks without LLM generation (fast - just embedding search)
             import time
             start = time.time()
-            nodes = self._retrieve_with_metadata_filtering(search_query, top_k=top_k)
+            if len(retrieval_queries) > 1:
+                nodes = self._retrieve_multi_query(retrieval_queries, top_k=top_k)
+            else:
+                nodes = self._retrieve_with_metadata_filtering(search_query, top_k=top_k)
             elapsed = time.time() - start
             print(f"✓ Embedding search completed in {elapsed:.3f} seconds (this is fast!)")
             return {
@@ -458,7 +511,10 @@ class TaxCodeRAG:
         start = time.time()
         
         # First, do the fast embedding search with expanded query
-        retrieved_nodes = self._retrieve_with_metadata_filtering(search_query, top_k=top_k)
+        if len(retrieval_queries) > 1:
+            retrieved_nodes = self._retrieve_multi_query(retrieval_queries, top_k=top_k)
+        else:
+            retrieved_nodes = self._retrieve_with_metadata_filtering(search_query, top_k=top_k)
         retrieval_time = time.time() - start
         print(f"\n✓ Retrieved {len(retrieved_nodes)} relevant chunks in {retrieval_time:.3f}s (embedding search)")
         print("\n" + "="*80)

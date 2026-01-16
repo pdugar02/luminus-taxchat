@@ -3,7 +3,11 @@ RAG query logic for the Tax Code web app.
 Provides get_rag and request handlers used by app.py.
 """
 
+import json
+from typing import List
+
 from index import TaxCodeRAG
+from llama_index.llms.ollama import Ollama
 import traceback
 
 # Initialize RAG system
@@ -49,6 +53,34 @@ def get_rag(index_name: str = None, chunks_file: str = None):
     return rag
 
 
+REFRAME_PROMPT = """You are a precise legal research assistant.
+Rephrase the user query into 3 alternative search queries that preserve the original meaning,
+use legal/tax terminology where helpful, and avoid adding new facts.
+
+Return ONLY a JSON array of exactly 3 strings. No extra text.
+
+User query:
+{question}
+"""
+
+
+def reframe_query(question: str, model: str = "llama3.1:8b", base_url: str = "http://localhost:11434") -> List[str]:
+    """Generate three re-phrased queries using Llama 3.1."""
+    llm = Ollama(model=model, base_url=base_url, request_timeout=20.0)
+    prompt = REFRAME_PROMPT.format(question=question)
+    response = llm.complete(prompt)
+    raw = response.text.strip()
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed][:3]
+    except json.JSONDecodeError:
+        pass
+    # Fallback: split lines and take first three non-empty lines
+    lines = [line.strip("- ").strip() for line in raw.splitlines() if line.strip()]
+    return lines[:3]
+
+
 def handle_query(data: dict) -> tuple[dict, int]:
     """Handle query requests and return (payload, status_code)."""
     try:
@@ -57,6 +89,18 @@ def handle_query(data: dict) -> tuple[dict, int]:
 
         if not question:
             return {'error': 'Question is required'}, 400
+
+        # Generate re-phrased queries for retrieval
+        try:
+            rephrased_queries = reframe_query(question)
+        except Exception:
+            rephrased_queries = []
+
+        # Use original question + rephrases for retrieval
+        retrieval_queries = []
+        for q in [question] + rephrased_queries:
+            if q and q not in retrieval_queries:
+                retrieval_queries.append(q)
 
         rag_system = get_rag()
 
@@ -71,7 +115,8 @@ def handle_query(data: dict) -> tuple[dict, int]:
                 question,
                 retrieve_only=True,
                 expand_query=expand_query,
-                top_k=top_k
+                top_k=top_k,
+                search_queries=retrieval_queries
             )
 
             chunks = []
@@ -86,7 +131,8 @@ def handle_query(data: dict) -> tuple[dict, int]:
             return {
                 'answer': result.get('answer', ''),
                 'chunks': chunks,
-                'retrieve_only': True
+                'retrieve_only': True,
+                'rephrased_queries': rephrased_queries
             }, 200
         else:
             # Full query with LLM (uses improved retrieval with query expansion)
@@ -95,7 +141,8 @@ def handle_query(data: dict) -> tuple[dict, int]:
                     question,
                     include_sources=True,
                     expand_query=expand_query,
-                    top_k=top_k
+                    top_k=top_k,
+                    search_queries=retrieval_queries
                 )
 
                 # Extract chunks from sources
@@ -111,7 +158,8 @@ def handle_query(data: dict) -> tuple[dict, int]:
                 return {
                     'answer': result.get('answer', ''),
                     'sources': result.get('sources', []),
-                    'chunks': chunks
+                    'chunks': chunks,
+                    'rephrased_queries': rephrased_queries
                 }, 200
             except Exception as e:
                 # If LLM times out, still try to retrieve chunks
@@ -120,7 +168,8 @@ def handle_query(data: dict) -> tuple[dict, int]:
                         question,
                         retrieve_only=True,
                         expand_query=expand_query,
-                        top_k=top_k
+                        top_k=top_k,
+                        search_queries=retrieval_queries
                     )
                     chunks = []
                     for source in retrieve_result.get('sources', []):
@@ -134,7 +183,8 @@ def handle_query(data: dict) -> tuple[dict, int]:
                         'answer': f'Retrieved relevant chunks, but LLM generation failed: {str(e)}',
                         'sources': [],
                         'chunks': chunks,
-                        'error': str(e)
+                        'error': str(e),
+                        'rephrased_queries': rephrased_queries
                     }, 200
                 except Exception as e2:
                     return {
