@@ -48,8 +48,18 @@ class TaxCodeRAG:
                             Use the exact model name you pulled, including tags like :8b
             ollama_base_url: Ollama server URL
         """
-        self.chunks_path = Path(chunks_path) if chunks_path else Path(__file__).parent / "data" / "rag_chunks2.json"
-        self.index_dir = Path(index_dir) if index_dir else Path(__file__).parent / "data" / "index"
+        data_dir = Path(__file__).parent / "data"
+        self.chunks_path = Path(chunks_path) if chunks_path else data_dir / "rag_chunks2.json"
+        if index_dir:
+            self.index_dir = Path(index_dir)
+        else:
+            # Prefer the newer named index directory, but fall back to legacy `data/index`
+            default_index_dir = data_dir / "index_rag_chunks2"
+            legacy_index_dir = data_dir / "index"
+            if default_index_dir.exists() or not legacy_index_dir.exists():
+                self.index_dir = default_index_dir
+            else:
+                self.index_dir = legacy_index_dir
         self.ollama_model = ollama_model
         self.ollama_base_url = ollama_base_url
         
