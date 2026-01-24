@@ -122,16 +122,20 @@ class XMLParser:
                     if row:
                         table_data['rows'].append(row)
         
-        # Create readable text representation
-        text_parts = []
-        if table_data['headers']:
-            text_parts.append(' | '.join(table_data['headers']))
-            text_parts.append('-' * 50)
+        # Create readable text representation as sentences
+        # Each row becomes a sentence: Header1 + Cell1 + Header2 + Cell2 + ...
+        sentences = []
+        headers = table_data['headers']
         
         for row in table_data['rows']:
-            text_parts.append(' | '.join(row))
+            sentence_parts = []
+            for i, cell in enumerate(row):
+                if i < len(headers):
+                    sentence_parts.append(headers[i])
+                sentence_parts.append(cell)
+            sentences.append(' '.join(sentence_parts))
         
-        table_data['text'] = '\n'.join(text_parts)
+        table_data['text'] = '\n'.join(sentences)
         
         return table_data
     
