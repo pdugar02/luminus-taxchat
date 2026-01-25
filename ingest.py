@@ -10,7 +10,7 @@ from lxml import etree
 from typing import List, Dict, Optional, Any
 import json
 import argparse
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from pathlib import Path
 from chunk import chunk_for_rag
 
@@ -33,6 +33,34 @@ class Chunk:
             self.metadata = {}
 
 
+@dataclass
+class HierarchyContext:
+    """Tracks the current position in the document hierarchy."""
+    title: Optional[Dict[str, str]] = None      # {identifier, heading}
+    subtitle: Optional[Dict[str, str]] = None
+    chapter: Optional[Dict[str, str]] = None
+    subchapter: Optional[Dict[str, str]] = None
+    part: Optional[Dict[str, str]] = None
+    subpart: Optional[Dict[str, str]] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for metadata, excluding None values."""
+        result = {}
+        if self.title:
+            result['title'] = self.title
+        if self.subtitle:
+            result['subtitle'] = self.subtitle
+        if self.chapter:
+            result['chapter'] = self.chapter
+        if self.subchapter:
+            result['subchapter'] = self.subchapter
+        if self.part:
+            result['part'] = self.part
+        if self.subpart:
+            result['subpart'] = self.subpart
+        return result
+
+
 class XMLParser:
     """Parser for USLM XML documents - Title 26 structure."""
     
@@ -43,6 +71,12 @@ class XMLParser:
         'paragraph', 'subparagraph', 'clause', 'subclause',
         'item', 'subitem'
     ]
+    
+    # Hierarchy elements that we track but don't chunk
+    HIERARCHY_ELEMENTS = ['title', 'subtitle', 'chapter', 'subchapter', 'part', 'subpart']
+    
+    # Elements that we actually chunk
+    CHUNKABLE_ELEMENTS = ['section', 'subsection', 'paragraph']
     
     def __init__(self, xml_path: str):
         self.xml_path = xml_path
@@ -317,17 +351,6 @@ class XMLParser:
         self.id_counter += 1
         return f"chunk_{self.id_counter}"
     
-    def _should_chunk(self, element: etree.Element) -> bool:
-        """Determine if an element should be chunked.
-        Only chunk up to paragraph level - subparagraphs and clauses are included in paragraph text."""
-        tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
-        # Don't chunk subparagraphs and clauses separately - they're part of paragraph text
-        chunkable_elements = [
-            'title', 'subtitle', 'chapter', 'subchapter', 
-            'part', 'subpart', 'section', 'subsection', 'paragraph'
-        ]
-        return tag_name in chunkable_elements
-    
     def _extract_tables_from_element(self, element: etree.Element) -> List[Dict[str, Any]]:
         """Extract tables from an element, but only from direct content (not from structural children like subsections)."""
         tables = []
@@ -371,8 +394,8 @@ class XMLParser:
         
         return tables
     
-    def _create_chunk(self, element: etree.Element, parent_chunk: Optional[Chunk]) -> Optional[Chunk]:
-        """Create a Chunk object from an element."""
+    def _create_chunk(self, element: etree.Element, parent_chunk: Optional[Chunk], hierarchy: HierarchyContext) -> Optional[Chunk]:
+        """Create a Chunk object from an element (only for sections, subsections, paragraphs)."""
         # Skip if repealed
         if self._is_repealed(element):
             return None
@@ -381,21 +404,13 @@ class XMLParser:
         chunk_id = self._generate_id(element)
         parent_id = parent_chunk.id if parent_chunk else None
         
-        # For sections, subsections, and paragraphs, extract full text content
-        # Subparagraphs and clauses are included in paragraph text, not chunked separately
-        # For higher-level elements (subtitle, chapter, etc.), just get heading
-        if tag_name in ['section', 'subsection', 'paragraph']:
-            text = self._get_text_content(element, skip_notes=True)
-            # Also extract tables as structured data (only for sections and subsections)
-            if tag_name in ['section', 'subsection']:
-                tables = self._extract_tables_from_element(element)
-            else:
-                tables = []
+        # Extract full text content for sections, subsections, and paragraphs
+        text = self._get_text_content(element, skip_notes=True)
+        
+        # Extract tables as structured data (only for sections and subsections)
+        if tag_name in ['section', 'subsection']:
+            tables = self._extract_tables_from_element(element)
         else:
-            # For higher levels, just get heading and identifier
-            heading = self._get_heading(element)
-            identifier = self._get_identifier(element)
-            text = heading or identifier or tag_name
             tables = []
         
         # Skip if no meaningful text
@@ -408,12 +423,13 @@ class XMLParser:
         # Get heading
         heading = self._get_heading(element)
         
-        # Build metadata
+        # Build metadata with hierarchy chain
         metadata = {
             'tag': tag_name,
             'element_id': element.get('id'),
             'identifier': identifier,
             'heading': heading,
+            'hierarchy': hierarchy.to_dict(),  # Include full hierarchy chain
         }
         
         # Add tables to metadata if present
@@ -436,41 +452,49 @@ class XMLParser:
         
         return chunk
     
-    def _process_element(self, element: etree.Element, parent_chunk: Optional[Chunk]):
-        """Recursively process an element and its children, skipping notes."""
+    def _process_element(self, element: etree.Element, parent_chunk: Optional[Chunk], hierarchy: HierarchyContext):
+        """Recursively process an element and its children, tracking hierarchy and creating chunks."""
         tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
         
-        # Skip all note elements entirely (and their children)
-        if tag_name == 'note':
-            return
-        
-        # Skip other non-structural elements we don't care about
-        # Note: We don't skip 'table' here because we want to extract table content
-        skip_tags = ['notes', 'toc', 'layout', 'thead', 'tbody', 'tr', 'td', 'th', 'colgroup', 'col']
+        # Skip non-structural elements we don't care about (notes, ToC, layout, table elements)
+        skip_tags = ['note', 'notes', 'toc', 'layout', 'thead', 'tbody', 'tr', 'td', 'th', 'colgroup', 'col']
         if tag_name in skip_tags:
             return
         
-        # Check if we should chunk this element
-        if self._should_chunk(element):
-            chunk = self._create_chunk(element, parent_chunk)
+        # Start with the current hierarchy
+        current_hierarchy = hierarchy
+        
+        # If this is a hierarchy element (title, subtitle, chapter, etc.), update context but don't chunk
+        if tag_name in self.HIERARCHY_ELEMENTS:
+            # Extract identifier and heading for this hierarchy level
+            hierarchy_info = {
+                'identifier': self._get_identifier(element),
+                'heading': self._get_heading(element),
+            }
+            
+            # Create a new HierarchyContext with the updated field
+            current_hierarchy = replace(hierarchy, **{tag_name: hierarchy_info})
+        
+        # If this is a chunkable element (section, subsection, paragraph), create a chunk
+        elif tag_name in self.CHUNKABLE_ELEMENTS:
+            chunk = self._create_chunk(element, parent_chunk, current_hierarchy)
             if chunk:
                 self.chunks.append(chunk)
                 parent_chunk = chunk
         
-        # Process children (but skip notes and other unwanted elements)
+        # Process children with the updated hierarchy context
         for child in element:
             child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-            # Skip notes and other unwanted elements
-            if child_tag not in ['note', 'notes', 'toc', 'layout', 'table']:
-                self._process_element(child, parent_chunk)
+            if child_tag not in skip_tags:
+                self._process_element(child, parent_chunk, current_hierarchy)
     
     def parse(self) -> List[Chunk]:
         """Parse the XML file and extract chunks."""
         print(f"Parsing XML file: {self.xml_path}")
         
-        # Parse the XML file
+        # Parse the XML file into a readable etree ElementTree object
         tree = etree.parse(self.xml_path)
-        root = tree.getroot()
+        root = tree.getroot() #finds the root
         
         # Find the main content area
         main = None
@@ -484,8 +508,8 @@ class XMLParser:
             # If no main element, start from root
             main = root
         
-        # Recursively process elements starting from main
-        self._process_element(main, None)
+        # Recursively process elements starting from main with empty hierarchy context
+        self._process_element(main, None, HierarchyContext())
         
         print(f"Extracted {len(self.chunks)} chunks")
         return self.chunks
@@ -557,6 +581,12 @@ def main(chunk_size: int = 1000, chunk_overlap: int = 200):
         print(f"  Identifier: {chunk.identifier}")
         print(f"  Parent ID: {chunk.parent_id}")
         print(f"  Children: {len(chunk.children_ids)}")
+        # Show hierarchy chain
+        hierarchy = chunk.metadata.get('hierarchy', {})
+        if hierarchy:
+            print("  Hierarchy:")
+            for level, info in hierarchy.items():
+                print(f"    {level}: {info.get('identifier')} - {info.get('heading')}")
         print(f"  Text preview: {chunk.text[:100]}...")
     
     print("\n=== Sample RAG Chunks ===")
@@ -565,6 +595,12 @@ def main(chunk_size: int = 1000, chunk_overlap: int = 200):
         print(f"  ID: {chunk['id']}")
         print(f"  Parent ID: {chunk['metadata'].get('parent_id')}")
         print(f"  Children: {len(chunk['metadata'].get('children_ids', []))}")
+        # Show hierarchy chain
+        hierarchy = chunk['metadata'].get('hierarchy', {})
+        if hierarchy:
+            print("  Hierarchy:")
+            for level, info in hierarchy.items():
+                print(f"    {level}: {info.get('identifier')} - {info.get('heading')}")
         print(f"  Text preview: {chunk['text'][:100]}...")
 
 
