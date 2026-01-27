@@ -158,7 +158,7 @@ class XMLParser:
                         table_data['rows'].append(row)
         
         # Create readable text representation as sentences
-        # Each row becomes a sentence: Header1 + Cell1 + Header2 + Cell2 + ...
+        # Each row becomes a sentence: Header1 + Cell1, Header2 + Cell2, ...
         sentences = []
         headers = table_data['headers']
         
@@ -166,9 +166,11 @@ class XMLParser:
             sentence_parts = []
             for i, cell in enumerate(row):
                 if i < len(headers):
-                    sentence_parts.append(headers[i])
-                sentence_parts.append(cell)
-            sentences.append(' '.join(sentence_parts))
+                    # Add header and cell as a pair
+                    header_cell_pair = f"{headers[i]} {cell}"
+                    sentence_parts.append(header_cell_pair)
+            # Join pairs with commas
+            sentences.append(', '.join(sentence_parts))
         
         table_data['text'] = '\n'.join(sentences)
         
@@ -248,8 +250,14 @@ class XMLParser:
                 table_data = self._extract_table(child)
                 if table_data and table_data.get('text'):
                     text_parts.append(table_data['text'])
-            elif tag_name in ['heading', 'num']:
-                # Include headings and numbers
+            elif tag_name == 'heading':
+                # Include headings with a colon separator
+                child_text = self._get_text_content(child, skip_notes=True)
+                if child_text:
+                    # Add colon after heading to separate it from content
+                    text_parts.append(child_text + ':')
+            elif tag_name == 'num':
+                # Include numbers without colon
                 child_text = self._get_text_content(child, skip_notes=True)
                 if child_text:
                     text_parts.append(child_text)
@@ -392,13 +400,8 @@ class XMLParser:
         parent_id = parent_chunk.id if parent_chunk else None
         
         # Extract full text content for sections (includes subsections and paragraphs)
+        # Tables are included in the text representation, so we don't need to extract them separately
         text = self._get_text_content(element, skip_notes=True)
-        
-        # Extract tables as structured data (only for sections, which now include subsections and paragraphs)
-        if tag_name == 'section':
-            tables = self._extract_tables_from_element(element)
-        else:
-            tables = []
         
         # Skip if no meaningful text
         if not text or len(text.strip()) < 3:
@@ -418,10 +421,6 @@ class XMLParser:
             'heading': heading,
             'hierarchy': hierarchy.to_dict(),  # Include full hierarchy chain
         }
-        
-        # Add tables to metadata if present
-        if tables:
-            metadata['tables'] = tables
         
         # Add any other relevant attributes
         for attr_name, attr_value in element.attrib.items():
