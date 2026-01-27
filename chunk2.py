@@ -94,6 +94,34 @@ class StructureFirstChunker:
         
         return text
     
+    def _find_subsection_boundaries(self, text: str) -> List[Tuple[int, str]]:
+        """
+        Find subsection boundaries like (a), (b), (c), etc. in US tax code sections.
+        Pattern matches (lowercase_letter) followed by space and capital letter.
+        Returns list of (position, subsection_label) tuples sorted by position.
+        
+        Args:
+            text: Text to search for subsection boundaries
+            
+        Returns:
+            List of (position, subsection_label) tuples, e.g., [(100, '(a)'), (500, '(b)')]
+        """
+        boundaries = []
+        
+        # Pattern: (lowercase_letter) followed by space and capital letter
+        # This matches subsection markers like "(a) Married individuals..." or "(b) Heads of households..."
+        pattern = r'\(([a-z])\)\s+([A-Z])'
+        
+        for match in re.finditer(pattern, text):
+            pos = match.start()
+            subsection_label = match.group(1)  # Extract just the letter, e.g., 'a', 'b'
+            boundaries.append((pos, f"({subsection_label})"))
+        
+        # Sort by position
+        boundaries.sort(key=lambda x: x[0])
+        
+        return boundaries
+    
     def _find_legal_boundaries(self, text: str) -> List[Tuple[int, str]]:
         """
         Find legal sub-item boundaries like (A), (B), (C), (i), (ii), (a)(1), etc.
