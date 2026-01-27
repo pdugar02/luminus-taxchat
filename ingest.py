@@ -1,8 +1,9 @@
 """
 XML Parser and Chunker for US Code Title 26 (Internal Revenue Code)
 Parses the XML file and extracts hierarchical chunks with parent/child relationships preserved.
-Extracts: subtitles → chapters → subchapters → parts (optional) → sections → subsections → paragraphs
-Subparagraphs and clauses are included in paragraph text, not chunked separately.
+Extracts: subtitles → chapters → subchapters → parts (optional) → sections
+Only sections are chunked; subsections and paragraphs are included in section text.
+Subparagraphs and clauses are included in their parent paragraph text.
 Skips: editorial notes, repealed sections
 """
 
@@ -76,7 +77,7 @@ class XMLParser:
     HIERARCHY_ELEMENTS = ['title', 'subtitle', 'chapter', 'subchapter', 'part', 'subpart']
     
     # Elements that we actually chunk
-    CHUNKABLE_ELEMENTS = ['section', 'subsection', 'paragraph']
+    CHUNKABLE_ELEMENTS = ['section']  # Only sections are chunked; subsections and paragraphs are included in section text
     
     def __init__(self, xml_path: str):
         self.xml_path = xml_path
@@ -220,14 +221,10 @@ class XMLParser:
         current_tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
         
         # Define hierarchy: skip structural children that will be chunked separately
-        # Note: subparagraphs and clauses are NOT skipped for paragraphs - they're included in paragraph text
+        # Note: Since only sections are chunked, we include subsections and paragraphs in section text
         skip_structural_children = []
-        if current_tag == 'section':
-            skip_structural_children = ['subsection']
-        elif current_tag == 'subsection':
-            skip_structural_children = ['paragraph']
-        # For paragraphs, include subparagraphs and clauses in the text (don't skip them)
-        # They won't be chunked separately because _should_chunk excludes them
+        # Sections include all subsections and paragraphs in their text (don't skip them)
+        # Subsections and paragraphs are not chunked separately anymore
         
         for child in element:
             # Skip all note elements (editorial notes, amendments, etc.)
@@ -246,9 +243,11 @@ class XMLParser:
                 if content_text:
                     text_parts.append(content_text)
             elif tag_name == 'table':
-                # Skip table elements - they are extracted separately and stored in metadata
-                # Don't add table text representation to chunk text
-                continue
+                # Extract table and include its text representation in the text flow
+                # Tables appear right after the content that introduces them (e.g., after paragraphs in a subsection)
+                table_data = self._extract_table(child)
+                if table_data and table_data.get('text'):
+                    text_parts.append(table_data['text'])
             elif tag_name in ['heading', 'num']:
                 # Include headings and numbers
                 child_text = self._get_text_content(child, skip_notes=True)
@@ -257,6 +256,13 @@ class XMLParser:
             elif tag_name in ['p', 'chapeau', 'continuation', 'subparagraph', 'clause']:
                 # Include actual content paragraphs, chapeau, continuation text, subparagraphs, and clauses
                 # Subparagraphs and clauses are included in paragraph text, not chunked separately
+                # Continuation elements may contain tables, which will be processed recursively
+                child_text = self._get_text_content(child, skip_notes=True)
+                if child_text:
+                    text_parts.append(child_text)
+            elif tag_name in ['subsection', 'paragraph']:
+                # Include subsections and paragraphs in section text (they're not chunked separately)
+                # Recursively get all text from subsection/paragraph including their children
                 child_text = self._get_text_content(child, skip_notes=True)
                 if child_text:
                     text_parts.append(child_text)
@@ -352,40 +358,21 @@ class XMLParser:
         return f"chunk_{self.id_counter}"
     
     def _extract_tables_from_element(self, element: etree.Element) -> List[Dict[str, Any]]:
-        """Extract tables from an element, but only from direct content (not from structural children like subsections)."""
+        """Extract tables from an element, including all tables from subsections and paragraphs within sections."""
         tables = []
         tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
         
-        # For sections, only extract tables from direct content, not from subsections
-        # For subsections, extract all tables normally
+        # For sections, extract all tables including those in subsections and paragraphs
+        # (since subsections and paragraphs are now included in section text)
         if tag_name == 'section':
-            # Only look for tables in direct children (like <content>), not in subsections
-            for child in element:
-                child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                # Skip structural children like subsections - they'll extract their own tables
-                if child_tag in self.STRUCTURAL_ELEMENTS:
-                    continue
-                # Look for tables only in this direct child's content
-                for table_elem in child.iter():
-                    table_tag = table_elem.tag.split('}')[-1] if '}' in table_elem.tag else table_elem.tag
-                    if table_tag == 'table':
-                        # Verify this table is not inside a structural child element
-                        # by checking if any ancestor between table and element is structural
-                        parent = table_elem.getparent()
-                        is_in_structural_child = False
-                        while parent is not None and parent != element:
-                            parent_tag = parent.tag.split('}')[-1] if '}' in parent.tag else parent.tag
-                            if parent_tag in self.STRUCTURAL_ELEMENTS:
-                                is_in_structural_child = True
-                                break
-                            parent = parent.getparent()
-                        
-                        # Only add table if it's not inside a structural child
-                        if not is_in_structural_child:
-                            table_data = self._extract_table(table_elem)
-                            tables.append(table_data)
+            # Extract all tables from the section, including those in subsections and paragraphs
+            for table_elem in element.iter():
+                table_tag = table_elem.tag.split('}')[-1] if '}' in table_elem.tag else table_elem.tag
+                if table_tag == 'table':
+                    table_data = self._extract_table(table_elem)
+                    tables.append(table_data)
         else:
-            # For subsections and other elements, extract all tables normally
+            # For other elements, extract all tables normally
             for table_elem in element.iter():
                 table_tag = table_elem.tag.split('}')[-1] if '}' in table_elem.tag else table_elem.tag
                 if table_tag == 'table':
@@ -404,11 +391,11 @@ class XMLParser:
         chunk_id = self._generate_id(element)
         parent_id = parent_chunk.id if parent_chunk else None
         
-        # Extract full text content for sections, subsections, and paragraphs
+        # Extract full text content for sections (includes subsections and paragraphs)
         text = self._get_text_content(element, skip_notes=True)
         
-        # Extract tables as structured data (only for sections and subsections)
-        if tag_name in ['section', 'subsection']:
+        # Extract tables as structured data (only for sections, which now include subsections and paragraphs)
+        if tag_name == 'section':
             tables = self._extract_tables_from_element(element)
         else:
             tables = []
@@ -475,7 +462,7 @@ class XMLParser:
             # Create a new HierarchyContext with the updated field
             current_hierarchy = replace(hierarchy, **{tag_name: hierarchy_info})
         
-        # If this is a chunkable element (section, subsection, paragraph), create a chunk
+        # If this is a chunkable element (only sections now), create a chunk
         elif tag_name in self.CHUNKABLE_ELEMENTS:
             chunk = self._create_chunk(element, parent_chunk, current_hierarchy)
             if chunk:
@@ -525,7 +512,7 @@ class XMLParser:
             raise ValueError(f"Unsupported format: {format}")
 
 
-def main(chunk_size: int = 1000, chunk_overlap: int = 200):
+def main(chunk_size: int = 2000, chunk_overlap: int = 400):
     """
     Main function to parse XML and extract chunks.
     
@@ -609,13 +596,13 @@ if __name__ == "__main__":
     parser.add_argument(
         '--chunk-size',
         type=int,
-        default=1000,
+        default=2000,
         help='Maximum chunk size in characters (default: 1000)'
     )
     parser.add_argument(
         '--chunk-overlap',
         type=int,
-        default=200,
+        default=400,
         help='Overlap between chunks in characters (default: 200). Set to 0 to disable overlap.'
     )
     args = parser.parse_args()

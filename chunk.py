@@ -22,8 +22,8 @@ class Chunker:
     
     def __init__(
         self,
-        chunk_size: int = 1000,
-        chunk_overlap: int = 200,
+        chunk_size: int = 2000,
+        chunk_overlap: int = 400,
         separators: List[str] = None
     ):
         """
@@ -114,7 +114,7 @@ class Chunker:
     def chunk_with_relationships(
         self,
         chunks: List[Dict],
-        max_chunk_size: int = 1000
+        max_chunk_size: int = 2000
     ) -> List[TextChunk]:
         """
         Process chunks and split large ones while preserving relationships.
@@ -187,7 +187,7 @@ def chunk_for_rag(chunks: List[Dict], chunk_size: int = 2000, chunk_overlap: int
     Args:
         chunks: List of chunk dictionaries
         chunk_size: Target chunk size
-        chunk_overlap: Overlap between chunks (in characters). Default is 200.
+        chunk_overlap: Overlap between chunks (in characters). Default is 400.
                       Set to 0 to disable overlap.
         
     Returns:

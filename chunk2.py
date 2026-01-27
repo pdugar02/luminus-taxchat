@@ -546,7 +546,7 @@ def chunk_for_rag_contiguous(
         min_tokens=min_tokens,
         max_tokens=max_tokens,
         split_threshold=max_tokens,  # Split if >max_tokens (not 1000!)
-        merge_threshold=150,
+        merge_threshold=200,
         chunk_overlap=chunk_overlap
     )
     
