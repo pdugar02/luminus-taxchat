@@ -219,9 +219,6 @@ class XMLParser:
         if element.text:
             text_parts.append(element.text.strip())
         
-        # Determine what structural children to skip based on current element type
-        current_tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
-        
         # Define hierarchy: skip structural children that will be chunked separately
         # Note: Since only sections are chunked, we include subsections and paragraphs in section text
         skip_structural_children = []
