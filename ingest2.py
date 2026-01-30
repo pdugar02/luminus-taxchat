@@ -110,26 +110,7 @@ def main(chunk_size: int = 500, chunk_overlap: int = 50):
     print("\nChunks by type:")
     for elem_type, count in sorted(type_counts.items(), key=lambda x: -x[1]):
         print(f"  {elem_type}: {count}")
-    
-    # Show sample chunks
-    print("\n=== Sample Raw Chunks ===")
-    for i, chunk in enumerate(chunks[:3]):
-        print(f"\nChunk {i+1}:")
-        print(f"  ID: {chunk.id}")
-        print(f"  Type: {chunk.element_type}")
-        print(f"  Identifier: {chunk.identifier}")
-        print(f"  Text length: {len(chunk.text)}")
-        print(f"  Text preview: {chunk.text[:100]}...")
-    
-    # Show sample RAG chunks with token statistics
-    print("\n=== Sample RAG Chunks (Structure-First with Token Counting) ===")
-    for i, chunk in enumerate(rag_chunks[:5]):
-        print(f"\nRAG Chunk {i+1}:")
-        print(f"  ID: {chunk['id']}")
-        token_count = chunk['metadata'].get('token_count', 'N/A')
-        print(f"  Token count: {token_count}")
-        print(f"  Text length: {len(chunk['text'])} chars")
-        print(f"  Text preview: {chunk['text'][:100]}...")
+
     
     # Show token statistics
     print("\n=== Token Statistics ===")

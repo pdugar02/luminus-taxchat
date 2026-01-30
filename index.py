@@ -26,7 +26,6 @@ class TaxCodeRAG:
     """RAG system for querying the US Tax Code."""
     
     # nomic-embed-text has a context window of 8192 tokens
-    # Using conservative limit to avoid context length errors
     MAX_EMBEDDING_TOKENS = 7500  # Conservative limit (7500 out of 8192) to account for model overhead
     
     def __init__(
@@ -121,6 +120,7 @@ class TaxCodeRAG:
             'score': getattr(node, 'score', None),
             'metadata': {
                 'identifier': metadata.get('identifier'),
+                'identifiers': metadata.get('identifiers', []),
                 'heading': metadata.get('heading'),
                 'tag': metadata.get('tag'),
             } if metadata else {}
@@ -172,11 +172,12 @@ class TaxCodeRAG:
         metadata = chunk.get('metadata', {})
         chunk_id = chunk.get('id', 'unknown')
         
-        # Build metadata
+        # Build metadata (identifiers = list of section ids for single or merged chunks)
         node_metadata = {
             'id': chunk_id,
             'tag': metadata.get('tag'),
             'identifier': metadata.get('identifier'),
+            'identifiers': metadata.get('identifiers', []),
             'heading': metadata.get('heading'),
             'parent_id': metadata.get('parent_id'),
             'children_ids': metadata.get('children_ids', []),
@@ -185,10 +186,11 @@ class TaxCodeRAG:
             'original_text': original_text,
         }
         
-        # Build prefix from identifier and heading
+        # Build prefix from identifier(s) and heading
         prefix_parts = []
-        if metadata.get('identifier'):
-            prefix_parts.append(f"§{metadata.get('identifier')}")
+        ids = metadata.get('identifiers') or ([metadata.get('identifier')] if metadata.get('identifier') is not None else [])
+        if ids:
+            prefix_parts.append('§' + ', §'.join(str(i) for i in ids))
         if metadata.get('heading'):
             prefix_parts.append(metadata.get('heading'))
         prefix = f"{' '.join(prefix_parts)}: " if prefix_parts else ""
@@ -393,11 +395,11 @@ class TaxCodeRAG:
             
             for node in nodes:
                 metadata = node.metadata if hasattr(node, 'metadata') else {}
-                identifier = metadata.get('identifier', '')
+                identifiers = metadata.get('identifiers') or ([metadata.get('identifier')] if metadata.get('identifier') is not None else [])
                 
-                # Check if this node's section matches any filter
+                # Check if this node's section(s) match any filter
                 matches = any(
-                    identifier.startswith(sec) or sec in identifier 
+                    any(str(i).startswith(sec) or sec in str(i) for i in identifiers)
                     for sec in filter_sections
                 )
                 
@@ -523,13 +525,14 @@ class TaxCodeRAG:
         for i, node in enumerate(retrieved_nodes, 1):
             score = getattr(node, 'score', None)
             metadata = node.metadata if hasattr(node, 'metadata') else {}
-            identifier = metadata.get('identifier', 'N/A')
+            ids = metadata.get('identifiers') or ([metadata.get('identifier')] if metadata.get('identifier') is not None else [])
+            section_str = ', §'.join(str(x) for x in ids) if ids else 'N/A'
             heading = metadata.get('heading', 'N/A')
             tag = metadata.get('tag', 'N/A')
             
             # Format score properly - can't use conditional in format specifier
             score_str = f"{score:.4f}" if score is not None else "N/A"
-            print(f"\n[{i}] Score: {score_str} | §{identifier} | {tag}")
+            print(f"\n[{i}] Score: {score_str} | §{section_str} | {tag}")
             if heading and heading != 'N/A':
                 print(f"    Heading: {heading}")
             print(f"    Text preview: {node.text[:200]}...")

@@ -201,7 +201,124 @@ class StructureFirstChunker:
             start_char=0,
             end_char=len(text)
         )]
-    
+
+    def _section_key(self, identifier: Optional[str]) -> Optional[str]:
+        """
+        Return the second-to-last character of the zero-padded identifier (integer string).
+        Used to decide if two consecutive chunks are in the same "section" for merging.
+        E.g. "4"/"5" -> "04"/"05" -> key "0" (merge); "68"/"71" -> "6"/"7" (do not merge).
+        Returns None if identifier is missing or length < 2 after padding.
+        """
+        if identifier is None:
+            return None
+        s = str(identifier).strip()
+        if not s:
+            return None
+        normalized = s.zfill(2)  # at least two chars: "4" -> "04"
+        if len(normalized) < 2:
+            return None
+        return normalized[-2]
+
+    def _merge_small_chunks(
+        self, chunks: List[Dict], start_idx: int
+    ) -> Tuple[List[ContiguousChunk], int]:
+        """
+        Merge small chunks (<min_tokens) with next consecutive chunks that share
+        the same section key (second-to-last digit of zero-padded identifier).
+        Stops when merged token count > max_tokens or no more same-section consecutive chunks.
+        Returns (list of ContiguousChunk(s), next index to process).
+        """
+        if start_idx >= len(chunks):
+            return [], start_idx
+
+        first_chunk = chunks[start_idx]
+        section_key = self._section_key(first_chunk.get('identifier'))
+        if section_key is None:
+            # No merge: emit single chunk
+            c = first_chunk
+            text = self._clean_text(c.get('text', ''))
+            single = ContiguousChunk(
+                id=c.get('id'),
+                text=text,
+                parent_id=c.get('parent_id'),
+                children_ids=list(c.get('children_ids', [])),
+                metadata=c.get('metadata', {}).copy(),
+                chunk_index=None,
+                start_char=0,
+                end_char=len(text),
+            )
+            single.metadata['tag'] = c.get('element_type', '')
+            single.metadata['identifier'] = c.get('identifier')
+            single.metadata['identifiers'] = [c.get('identifier')] if c.get('identifier') is not None else []
+            single.metadata['heading'] = single.metadata.get('heading', '')
+            single.metadata['element_id'] = c.get('id')
+            return [single], start_idx + 1
+
+        merged_parts = []
+        merged_metadata = first_chunk.get('metadata', {}).copy()
+        merged_metadata['tag'] = first_chunk.get('element_type', '')
+        merged_metadata['identifier'] = first_chunk.get('identifier')
+        merged_metadata['heading'] = merged_metadata.get('heading', '')
+        merged_metadata['element_id'] = first_chunk.get('id')
+        total_tokens = 0
+        chunk_ids = []
+        children_ids = []
+        section_identifiers = []  # list of section identifiers for merged chunk
+        current_idx = start_idx
+
+        while current_idx < len(chunks):
+            chunk = chunks[current_idx]
+            if self._section_key(chunk.get('identifier')) != section_key:
+                break
+            chunk_text = self._clean_text(chunk.get('text', ''))
+            chunk_tokens = self.count_tokens(chunk_text)
+            if total_tokens + chunk_tokens > self.max_tokens and total_tokens >= self.min_tokens:
+                break
+            section_identifiers.append(chunk.get('identifier'))
+            merged_parts.append(chunk_text)
+            total_tokens += chunk_tokens
+            chunk_ids.append(chunk.get('id'))
+            children_ids.extend(chunk.get('children_ids', []))
+            current_idx += 1
+            if total_tokens > self.max_tokens:
+                break
+
+        merged_metadata['identifiers'] = section_identifiers
+
+        if current_idx <= start_idx + 1:
+            c = first_chunk
+            text = self._clean_text(c.get('text', ''))
+            single = ContiguousChunk(
+                id=c.get('id'),
+                text=text,
+                parent_id=c.get('parent_id'),
+                children_ids=list(c.get('children_ids', [])),
+                metadata=merged_metadata,
+                chunk_index=None,
+                start_char=0,
+                end_char=len(text),
+            )
+            return [single], start_idx + 1
+
+        merged_text = '\n'.join(merged_parts)
+        merged_text = self._clean_text(merged_text)
+        final_tokens = self.count_tokens(merged_text)
+        if final_tokens > self.max_tokens:
+            split_chunks = self._split_large_chunk(merged_text, chunk_ids[0], merged_metadata)
+            return split_chunks, current_idx
+
+        merged_chunk = ContiguousChunk(
+            id=chunk_ids[0],
+            text=merged_text,
+            parent_id=first_chunk.get('parent_id'),
+            children_ids=children_ids,
+            metadata=merged_metadata,
+            chunk_index=None,
+            start_char=0,
+            end_char=len(merged_text),
+        )
+        return [merged_chunk], current_idx
+
     def chunk_with_relationships(
         self,
         chunks: List[Dict],
@@ -239,9 +356,10 @@ class StructureFirstChunker:
             children_ids = chunk_dict.get('children_ids', [])
             metadata = chunk_dict.get('metadata', {}).copy()
             
-            # Add element type and identifier to metadata
+            # Add element type and identifier to metadata (identifiers = list for single or merged sections)
             metadata['tag'] = chunk_dict.get('element_type', '')
             metadata['identifier'] = chunk_dict.get('identifier')
+            metadata['identifiers'] = [chunk_dict.get('identifier')] if chunk_dict.get('identifier') is not None else []
             metadata['heading'] = metadata.get('heading', '')
             metadata['element_id'] = chunk_dict.get('id')
             
@@ -282,9 +400,17 @@ class StructureFirstChunker:
                     result_chunks.append(new_chunk)
                     chunk_id_map[original_id] = [original_id]
                 i += 1
-
+            elif token_count < self.min_tokens:
+                merged_list, next_i = self._merge_small_chunks(chunks, i)
+                merged_ids = [c.id for c in merged_list]
+                for idx in range(i, next_i):
+                    oid = chunks[idx].get('id')
+                    if oid is not None:
+                        chunk_id_map[oid] = merged_ids
+                result_chunks.extend(merged_list)
+                i = next_i
             else:
-                # Chunk is not too large: keep as single chunk
+                # Chunk is in the sweet spot: keep as single chunk
                 new_chunk = ContiguousChunk(
                     id=original_id,
                     text=text,
