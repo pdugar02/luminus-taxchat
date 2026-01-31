@@ -25,14 +25,16 @@ from llama_index.llms.ollama import Ollama
 class TaxCodeRAG:
     """RAG system for querying the US Tax Code."""
     
-    # nomic-embed-text has a context window of 8192 tokens
-    MAX_EMBEDDING_TOKENS = 7500  # Conservative limit (7500 out of 8192) to account for model overhead
+    # Embedding model context limit (nomic-embed-text / Ollama).
+    MAX_EMBEDDING_TOKENS = 2000
+    # Safety margin: truncate to this many tokens so tokenizer differences don't exceed limit
+    EMBEDDING_TRUNCATE_TOKENS = 1950
     
     def __init__(
         self,
         chunks_path: Optional[str] = None,
         index_dir: Optional[str] = None,
-        embedding_model: str = "nomic-embed-text",
+        embedding_model: str = "embeddinggemma",
         ollama_model: str = "llama3.1:8b",  # Use the model tag you pulled (e.g., llama3.1:8b)
         ollama_base_url: str = "http://localhost:11434",
     ):
@@ -40,7 +42,7 @@ class TaxCodeRAG:
         Initialize the RAG system.
         
         Args:
-            chunks_path: Path to rag_chunks.json file
+            chunks_path: Path to chunks json file
             index_dir: Directory to save/load index (default: ./data/index)
             embedding_model: Ollama model name for embeddings (default: nomic-embed-text)
             ollama_model: Ollama model name for LLM (default: llama3.1:8b)
@@ -260,9 +262,16 @@ class TaxCodeRAG:
         except (UnicodeDecodeError, UnicodeEncodeError) as e:
             print(f"WARNING: Encoding error in chunk {chunk_id}: {e}. Fixing.")
             text = text.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
-            node_metadata['encoding_fixed'] = True
-        
-        return TextNode(text=text, metadata=node_metadata, id_=chunk_id)
+
+        # Exclude large metadata from what gets embedded: VectorStoreIndex embeds
+        # node.get_content(metadata_mode=MetadataMode.EMBED) = metadata_str + "\n\n" + text.
+        # Without this, original_text (full unchunked text) would be in metadata_str and blow the context limit.
+        return TextNode(
+            text=text,
+            metadata=node_metadata,
+            id_=chunk_id,
+            excluded_embed_metadata_keys=["original_text"],
+        )
     
     def _build_index(self) -> VectorStoreIndex:
         """Build index from chunks."""
@@ -270,25 +279,35 @@ class TaxCodeRAG:
         chunks = self._load_chunks()
         
         # Convert chunks to nodes with progress tracking
+        context_limit = self.MAX_EMBEDDING_TOKENS
+        truncate_to = getattr(self, 'EMBEDDING_TRUNCATE_TOKENS', context_limit)
         nodes = []
-        problematic_chunks = []
         for i, chunk in enumerate(chunks):
             try:
                 node = self._chunk_to_node(chunk)
-                # Validate node text is within limits
+                # Enforce hard cap so embedding model never sees over-long input
                 final_tokens = self.token_encoder.encode(node.text)
-                if len(final_tokens) > self.MAX_EMBEDDING_TOKENS:
-                    problematic_chunks.append((chunk.get('id', 'unknown'), len(final_tokens)))
-                    print(f"WARNING: Chunk {chunk.get('id')} has {len(final_tokens)} tokens after processing")
+                input_tokens = len(final_tokens)
+                original_tokens = input_tokens
+                truncated = False
+                if input_tokens > truncate_to:
+                    truncated_text = self.token_encoder.decode(final_tokens[:truncate_to])
+                    meta = dict(node.metadata) if node.metadata else {}
+                    meta['hard_truncated'] = True
+                    meta['original_token_count'] = input_tokens
+                    node = TextNode(text=truncated_text, metadata=meta, id_=node.node_id)
+                    input_tokens = truncate_to
+                    truncated = True
+                # Debug: print first chunk and any truncated chunk (input_length vs context_limit)
+                if i == 0 or truncated:
+                    msg = f"  Chunk {i}: id={node.node_id} | input_tokens={input_tokens} | context_limit={context_limit}"
+                    if truncated:
+                        msg += f" (was {original_tokens} before truncation)"
+                    print(msg)
                 nodes.append(node)
             except Exception as e:
                 print(f"ERROR processing chunk {chunk.get('id', 'unknown')}: {e}")
-                # Skip problematic chunks to avoid crashing
                 continue
-        
-        if problematic_chunks:
-            print(f"\n⚠️  Found {len(problematic_chunks)} chunks that still exceed token limit")
-            print("These will be hard-truncated during embedding generation")
         
         print(f"Converted {len(nodes)} chunks to nodes")
         
@@ -665,7 +684,8 @@ def list_indexes():
 def build_index_cmd(
     chunks_file: str,
     index_name: str = None,
-    embedding_model: str = "nomic-embed-text",
+    # embedding_model: str = "nomic-embed-text",
+    embedding_model: str = "embeddinggemma",
     ollama_base_url: str = "http://localhost:11434",
     force_rebuild: bool = False
 ):
@@ -743,7 +763,7 @@ def main():
     build_parser = subparsers.add_parser('build', help='Build a vector index from chunks')
     build_parser.add_argument('chunks_file', help='Path to chunks JSON file')
     build_parser.add_argument('--index-name', type=str, help='Name for the index directory')
-    build_parser.add_argument('--embedding-model', type=str, default='nomic-embed-text', help='Ollama embedding model')
+    build_parser.add_argument('--embedding-model', type=str, default='embeddinggemma', help='Ollama embedding model')
     build_parser.add_argument('--ollama-base-url', type=str, default='http://localhost:11434', help='Ollama server URL')
     build_parser.add_argument('--force', action='store_true', help='Force rebuild even if index exists')
     
