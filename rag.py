@@ -18,7 +18,6 @@ from llama_index.core.schema import TextNode
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.vector_stores import SimpleVectorStore
-from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.llms.ollama import Ollama
 
 
@@ -70,13 +69,7 @@ class TaxCodeRAG:
         except KeyError:
             # Fallback to cl100k_base (used by GPT-4 and similar models)
             self.token_encoder = tiktoken.get_encoding("cl100k_base")
-        
-        # Initialize embedding model (using nomic-embed-text)
-        print(f"Using Ollama for embeddings: {embedding_model}")
-        Settings.embed_model = OllamaEmbedding(
-            model_name=embedding_model,
-            base_url=ollama_base_url
-        )
+    
         
         # Initialize LLM (Ollama)
         print(f"Initializing Ollama LLM: {ollama_model}")

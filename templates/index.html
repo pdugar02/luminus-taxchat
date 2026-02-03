@@ -573,23 +573,42 @@
                 messageDiv.appendChild(chunksSection);
             }
 
-            // Add sources if available
+            // Add sources if available (render with same expandable UI as chunks)
             if (sources && sources.length > 0) {
                 const sourcesSection = document.createElement('div');
                 sourcesSection.className = 'sources-section';
                 sourcesSection.innerHTML = '<h4>📚 Sources</h4>';
                 
+                const previewLength = 200;
                 sources.forEach((source, idx) => {
+                    const text = source.text || '';
+                    const hasMoreText = text.length > previewLength;
+                    const previewText = hasMoreText ? text.substring(0, previewLength) : text;
+                    const uniqueId = chunkCounter++;
+                    
                     const sourceDiv = document.createElement('div');
-                    sourceDiv.className = 'source';
-                    let text = `[${idx + 1}] `;
-                    if (source.metadata && source.metadata.identifier) {
-                        text += `§${source.metadata.identifier} `;
+                    sourceDiv.className = 'chunk'; // reuse chunk styles and expand behavior
+                    sourceDiv.id = `chunk-${uniqueId}`;
+                    
+                    const meta = source.metadata || {};
+                    let html = '<div class="chunk-header">';
+                    html += `<span class="chunk-id">[${idx + 1}] §${meta.identifier || 'null'} | ${meta.tag || 'null'}</span>`;
+                    if (source.score != null) {
+                        html += `<span class="chunk-score">Score: ${Number(source.score).toFixed(3)}</span>`;
                     }
-                    if (source.metadata && source.metadata.heading) {
-                        text += `- ${source.metadata.heading}`;
+                    html += '</div>';
+                    if (meta.heading && meta.heading !== 'N/A' && meta.heading !== null) {
+                        html += `<div class="chunk-heading">${escapeHtml(meta.heading)}</div>`;
                     }
-                    sourceDiv.textContent = text;
+                    html += `<div class="chunk-text-preview">${escapeHtml(previewText)}${hasMoreText ? '...' : ''}</div>`;
+                    html += `<div class="chunk-text-full" id="chunk-full-${uniqueId}">${escapeHtml(text)}</div>`;
+                    if (hasMoreText) {
+                        html += `<div class="chunk-expand-btn" onclick="toggleChunk(${uniqueId})" id="chunk-btn-${uniqueId}">`;
+                        html += '<span class="expand-arrow"></span>';
+                        html += '<span class="expand-text">Show full text</span>';
+                        html += '</div>';
+                    }
+                    sourceDiv.innerHTML = html;
                     sourcesSection.appendChild(sourceDiv);
                 });
                 
