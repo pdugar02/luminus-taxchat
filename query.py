@@ -6,7 +6,7 @@ Provides get_rag and request handlers used by app.py.
 import json
 from typing import List
 
-from index import TaxCodeRAG
+from rag import TaxCodeRAG
 from llama_index.llms.ollama import Ollama
 import traceback
 
@@ -106,7 +106,7 @@ def handle_query(data: dict) -> tuple[dict, int]:
 
         # Get optional parameters
         expand_query = data.get('expand_query', True)  # Enable query expansion by default
-        top_k = data.get('top_k', 10)  # Number of chunks to retrieve
+        top_k = data.get('top_k', 5)  # Number of chunks to retrieve
 
         # Query the RAG system with improved retrieval
         if retrieve_only:

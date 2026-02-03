@@ -185,7 +185,6 @@ class TaxCodeRAG:
             'children_ids': metadata.get('children_ids', []),
             'element_id': metadata.get('element_id'),
             'chunk_index': metadata.get('chunk_index'),
-            'original_text': original_text,
         }
         
         # Build prefix from identifier(s) and heading
@@ -270,7 +269,6 @@ class TaxCodeRAG:
             text=text,
             metadata=node_metadata,
             id_=chunk_id,
-            excluded_embed_metadata_keys=["original_text"],
         )
     
     def _build_index(self) -> VectorStoreIndex:
@@ -378,6 +376,9 @@ class TaxCodeRAG:
         2. Expands abbreviations (e.g., "MFS" -> "married filing separately")
         3. Adds related terms (e.g., "tax rate" for "how much am I taxed")
         4. Keeps the core intent of the question
+        5. If a specific section is asked for in the original query, make sure to include that section number
+        6. Evaluate key phrases and terms in the search query. If there is something ambiguous, rephrase it with your best interpretation of what the user is trying to ask given the context.
+        7. Focus on the terms that actually matter to the user's question. If the user is asking about a specific section, focus on that section. If the user is asking about a specific term, focus on that term. Do not focus on arbitrary terms or numbers that are not going to be present in the most relevant chunks to the query.
 
         Return ONLY the improved search query, nothing else:"""
 
@@ -434,71 +435,28 @@ class TaxCodeRAG:
         
         return nodes
 
-    def _retrieve_multi_query(
-        self,
-        queries: List[str],
-        top_k: int = 10,
-        filter_sections: Optional[List[str]] = None
-    ) -> List:
-        """Retrieve and merge results across multiple queries."""
-        node_by_id = {}
-
-        for query in queries:
-            if not query:
-                continue
-            nodes = self._retrieve_with_metadata_filtering(
-                query,
-                top_k=top_k,
-                filter_sections=filter_sections
-            )
-            for node in nodes:
-                node_id = getattr(node, "node_id", None)
-                if not node_id:
-                    continue
-                existing = node_by_id.get(node_id)
-                if existing is None:
-                    node_by_id[node_id] = node
-                else:
-                    # Keep the node with the higher score if available
-                    existing_score = getattr(existing, "score", None)
-                    node_score = getattr(node, "score", None)
-                    if existing_score is None and node_score is not None:
-                        node_by_id[node_id] = node
-                    elif (
-                        existing_score is not None
-                        and node_score is not None
-                        and node_score > existing_score
-                    ):
-                        node_by_id[node_id] = node
-
-        merged_nodes = list(node_by_id.values())
-
-        def sort_key(n):
-            score = getattr(n, "score", None)
-            return score if score is not None else float("-inf")
-
-        merged_nodes.sort(key=sort_key, reverse=True)
-        return merged_nodes[:top_k]
-    
     def query(
-        self, 
-        question: str, 
-        include_sources: bool = True, 
+        self,
+        question: str,
+        include_sources: bool = True,
         retrieve_only: bool = False,
         expand_query: bool = True,
         top_k: int = 10,
-        search_queries: Optional[List[str]] = None
+        search_queries: Optional[List[str]] = None,
+        **kwargs,
     ) -> Dict:
         """
         Query the tax code.
-        
+
         Args:
             question: User's question about the tax code
             include_sources: Whether to include source citations
             retrieve_only: If True, only retrieve relevant chunks without LLM generation (faster for testing)
             expand_query: Whether to expand/rewrite the query using LLM (default: True)
             top_k: Number of chunks to retrieve (default: 10)
-            
+            search_queries: Optional list of queries for retrieval (e.g. original + rephrases).
+                           If provided, retrieves for each query and merges by node_id (keeps higher score).
+
         Returns:
             Dictionary with 'answer' and optionally 'sources'
         """
@@ -508,59 +466,54 @@ class TaxCodeRAG:
         search_query = question
         if expand_query:
             search_query = self._expand_query(question)
-        
-        # Determine which queries to use for retrieval
-        retrieval_queries = search_queries if search_queries else [search_query]
 
-        if retrieve_only:
-            # Just retrieve relevant chunks without LLM generation (fast - just embedding search)
-            import time
-            start = time.time()
-            if len(retrieval_queries) > 1:
-                nodes = self._retrieve_multi_query(retrieval_queries, top_k=top_k)
-            else:
-                nodes = self._retrieve_with_metadata_filtering(search_query, top_k=top_k)
-            elapsed = time.time() - start
-            print(f"✓ Embedding search completed in {elapsed:.3f} seconds (this is fast!)")
-            return {
-                'answer': f"Retrieved {len(nodes)} relevant chunks (retrieve_only mode)",
-                'sources': [self._format_source(node) for node in nodes]
-            }
-        
+        # Queries to use for retrieval (caller may pass multiple)
+        queries = search_queries if search_queries else [search_query]
+
         # Query the index (includes LLM generation - this is where timeouts happen)
         import time
         start = time.time()
-        
-        # First, do the fast embedding search with expanded query
-        if len(retrieval_queries) > 1:
-            retrieved_nodes = self._retrieve_multi_query(retrieval_queries, top_k=top_k)
-        else:
-            retrieved_nodes = self._retrieve_with_metadata_filtering(search_query, top_k=top_k)
+
+        # Embedding search: one retrieval per query, then merge by node_id (keep higher score)
+        node_by_id = {}
+        for q in queries:
+            if not q:
+                continue
+            nodes = self._retrieve_with_metadata_filtering(q, top_k=top_k)
+            for node in nodes:
+                nid = getattr(node, "node_id", None)
+                if not nid:
+                    continue
+                existing = node_by_id.get(nid)
+                if existing is None:
+                    node_by_id[nid] = node
+                else:
+                    existing_score = getattr(existing, "score", None)
+                    node_score = getattr(node, "score", None)
+                    if existing_score is None and node_score is not None:
+                        node_by_id[nid] = node
+                    elif (
+                        existing_score is not None
+                        and node_score is not None
+                        and node_score > existing_score
+                    ):
+                        node_by_id[nid] = node
+        merged = list(node_by_id.values())
+        merged.sort(key=lambda n: getattr(n, "score", None) or float("-inf"), reverse=True)
+        retrieved_nodes = merged[:top_k]
         retrieval_time = time.time() - start
         print(f"\n✓ Retrieved {len(retrieved_nodes)} relevant chunks in {retrieval_time:.3f}s (embedding search)")
         print("\n" + "="*80)
-        print("RETRIEVED CHUNKS (before LLM processing):")
-        print("="*80)
-        for i, node in enumerate(retrieved_nodes, 1):
-            score = getattr(node, 'score', None)
-            metadata = node.metadata if hasattr(node, 'metadata') else {}
-            ids = metadata.get('identifiers') or ([metadata.get('identifier')] if metadata.get('identifier') is not None else [])
-            section_str = ', §'.join(str(x) for x in ids) if ids else 'N/A'
-            heading = metadata.get('heading', 'N/A')
-            tag = metadata.get('tag', 'N/A')
-            
-            # Format score properly - can't use conditional in format specifier
-            score_str = f"{score:.4f}" if score is not None else "N/A"
-            print(f"\n[{i}] Score: {score_str} | §{section_str} | {tag}")
-            if heading and heading != 'N/A':
-                print(f"    Heading: {heading}")
-            print(f"    Text preview: {node.text[:200]}...")
-            if len(node.text) > 200:
-                print(f"    (Full text length: {len(node.text)} chars)")
-        print("="*80)
+        
+
+        if retrieve_only: # return retrieved chunks without trying to formulate an answer
+            return {
+                'answer': f"Retrieved {len(retrieved_nodes)} relevant chunks (retrieve_only mode)",
+                'sources': [self._format_source(node) for node in retrieved_nodes]
+            }
         
         # Then generate answer with LLM using expanded query (this can be slow and cause timeouts)
-        print("\nGenerating answer with LLM (this may take a while)...")
+        print("\nGenerating answer with LLM...")
         try:
             # Use the expanded query for better context
             response = self.query_engine.query(search_query)
@@ -644,12 +597,6 @@ class TaxCodeRAG:
     def check_ollama(ollama_base_url: str = "http://localhost:11434") -> bool:
         """
         Check if Ollama is running and accessible.
-        
-        Args:
-            ollama_base_url: Ollama server URL
-            
-        Returns:
-            True if Ollama is accessible, False otherwise
         """
         try:
             import requests
