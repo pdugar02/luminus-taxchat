@@ -8,7 +8,7 @@ from typing import List
 
 from rag import TaxCodeRAG
 from llama_index.llms.ollama import Ollama
-import traceback
+import time
 
 rag = None
 REFRAME_PROMPT = """You are a precise legal research assistant.
@@ -100,98 +100,6 @@ def expand_query(question: str) -> str:
         llm = Ollama(model="llama3.1:8b", base_url="http://localhost:11434", request_timeout=20.0)
         expanded = llm.complete(EXPANSION_PROMPT.format(question=question)).text.strip()
         return expanded
-
-
-def query(rag: TaxCodeRAG,
-        question: str,
-        include_sources: bool = True,
-        retrieve_only: bool = False,
-        expand: bool = True,
-        top_k: int = 10,
-    ) -> dict:
-        """
-        Query the tax code.
-
-        Args:
-            question: User's question about the tax code
-            include_sources: Whether to include source citations
-            retrieve_only: If True, only retrieve relevant chunks without LLM generation (faster for testing)
-            expand: Whether to expand/rewrite the query using LLM (default: True)
-            top_k: Number of chunks to retrieve (default: 10)
-
-        Returns:
-            Dictionary with 'answer' and optionally 'sources'
-        """
-        print(f"\nOriginal Query: {question}")
-
-        
-        # Queries to use for retrieval
-        queries = reframe_query(question)
-
-
-        # Query the index (includes LLM generation - this is where timeouts happen)
-        import time
-        start = time.time()
-
-        # Embedding search: one retrieval per query, then merge by node_id (keep higher score)
-        node_by_id = {}
-        for q in queries:
-            if not q:
-                continue
-            expanded_q = expand_query(q) if expand else q
-            nodes = rag.retriever.retrieve(expanded_q)[:top_k]
-            for node in nodes:
-                nid = getattr(node, "node_id", None)
-                if not nid:
-                    continue
-                existing = node_by_id.get(nid)
-                if existing is None:
-                    node_by_id[nid] = node
-                else:
-                    existing_score = getattr(existing, "score", None)
-                    node_score = getattr(node, "score", None)
-                    if existing_score is None and node_score is not None:
-                        node_by_id[nid] = node
-                    elif (
-                        existing_score is not None
-                        and node_score is not None
-                        and node_score > existing_score
-                    ):
-                        node_by_id[nid] = node
-        merged = list(node_by_id.values())
-        merged.sort(key=lambda n: getattr(n, "score", None) or float("-inf"), reverse=True)
-        retrieved_nodes = merged[:top_k]
-        retrieval_time = time.time() - start
-        print(f"\n[Retrieval] {retrieval_time:.3f}s — {len(retrieved_nodes)} chunks")
-        print("="*80)
-
-        if retrieve_only: # return retrieved chunks without trying to formulate an answer
-            return {
-                'answer': f"Retrieved {len(retrieved_nodes)} relevant chunks (retrieve_only mode)",
-                'sources': [rag._format_source(node) for node in retrieved_nodes]
-            }
-        
-        # Then generate answer with LLM (this can be slow and cause timeouts)
-        print("\nGenerating answer with LLM...")
-        try:
-            gen_start = time.time()
-            response = rag.query_engine.query(question)
-            generation_time = time.time() - gen_start
-            print(f"[Generation] {generation_time:.3f}s")
-            total_time = time.time() - start
-            print(f"[Total] {total_time:.3f}s (retrieval: {retrieval_time:.3f}s, generation: {generation_time:.3f}s)")
-        except Exception as e:
-            print(f"\n⚠️  LLM generation failed: {e}")
-            print("But we successfully retrieved the chunks above - the embedding search is working!")
-            # Return the retrieved chunks even if LLM fails
-            return {
-                'answer': f"LLM generation timed out, but retrieved {len(retrieved_nodes)} relevant chunks. See retrieved chunks above.",
-                'sources': [rag._format_source(node) for node in retrieved_nodes]
-            }
-        
-        # Extract answer
-        result = {'answer': str(response), 'sources': [rag._format_source(node, preview_length=200) for node in response.source_nodes[:5]]}
-        return result
     
 
 def handle_query(data: dict) -> tuple[dict, int]:
@@ -204,6 +112,9 @@ def handle_query(data: dict) -> tuple[dict, int]:
     query_engine = rag_system.index.as_query_engine(
         include_text=True, response_mode="tree_summarize", retriever_mode='hybrid'
     )
+    start = time.time()
+    question = expand_query(question)
     result = query_engine.query(question)
-
-    return {'answer': result.response, 'sources': [rag._format_source(node, preview_length=200) for node in result.source_nodes[:5]]}, 200
+    end = time.time()
+    print(f"Time taken to query: {end - start} seconds")
+    return {'answer': result.response, 'sources': [rag_system.format_source(node, preview_length=200) for node in result.source_nodes[:5]]}, 200

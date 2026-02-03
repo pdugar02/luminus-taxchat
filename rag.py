@@ -112,7 +112,7 @@ class TaxCodeRAG:
             return node.metadata.get('original_text') or node.text
         return node.text
     
-    def _format_source(self, node, preview_length: int = 300) -> Dict:
+    def format_source(self, node, preview_length: int = 300) -> Dict:
         """Format a node as a source dictionary."""
         metadata = node.metadata if hasattr(node, 'metadata') else {}
         return {

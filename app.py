@@ -56,7 +56,7 @@ def run_app():
     print("  python app.py --index-name <name> --port <port>")
     print("  RAG_INDEX_NAME=<name> python app.py")
     print("="*80 + "\n")
-    app.run(debug=True, host='0.0.0.0', port=port)
+    app.run(debug=True, host='0.0.0.0', port=port, use_reloader=False)
 
 
 if __name__ == '__main__':
