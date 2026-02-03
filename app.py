@@ -4,7 +4,7 @@ Routes and server start live here; query logic lives in query.py.
 """
 
 from flask import Flask, render_template, request, jsonify
-from query import get_rag, handle_query, health_status
+from query import get_rag, handle_query
 
 app = Flask(__name__)
 
@@ -20,14 +20,6 @@ def query():
     """Handle query requests."""
     payload, status = handle_query(request.json or {})
     return jsonify(payload), status
-
-
-@app.route('/api/health', methods=['GET'])
-def health():
-    """Health check endpoint."""
-    payload, status = health_status()
-    return jsonify(payload), status
-
 
 def run_app():
     import sys
@@ -50,10 +42,9 @@ def run_app():
             # Legacy: port as first positional argument
             port = int(arg)
 
-    # Initialize RAG with specified index
-    if index_name or chunks_file:
-        print(f"\nUsing index: {index_name or 'from chunks file'}")
-        get_rag(index_name=index_name, chunks_file=chunks_file)
+    # Initialize RAG at startup (once) so first query doesn't pay init cost
+    print("\nInitializing RAG...")
+    get_rag(index_name=index_name, chunks_file=chunks_file)
 
     print("\n" + "="*80)
     print("Starting Flask server...")

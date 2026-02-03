@@ -9,9 +9,6 @@ from typing import List
 from rag import TaxCodeRAG
 from llama_index.llms.ollama import Ollama
 import traceback
-
-# Initialize RAG system
-print("Initializing RAG system...")
 rag = None
 
 
@@ -302,18 +299,3 @@ def handle_query(data: dict) -> tuple[dict, int]:
         error_msg = str(e)
         traceback.print_exc()
         return {'error': error_msg}, 500
-
-
-def health_status() -> tuple[dict, int]:
-    """Health check payload and status."""
-    try:
-        rag_system = get_rag()
-        return {
-            'status': 'healthy',
-            'index_loaded': rag_system.index is not None
-        }, 200
-    except Exception as e:
-        return {
-            'status': 'error',
-            'error': str(e)
-        }, 500
