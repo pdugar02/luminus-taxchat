@@ -110,7 +110,7 @@ def handle_query(data: dict) -> tuple[dict, int]:
 
     rag_system = get_rag()
     query_engine = rag_system.index.as_query_engine(
-        include_text=True, response_mode="tree_summarize", retriever_mode='hybrid'
+        include_text=True, response_mode="refine", retriever_mode='hybrid', similarity_top_k=10
     )
     start = time.time()
     question = expand_query(question)
