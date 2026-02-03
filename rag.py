@@ -89,7 +89,7 @@ class TaxCodeRAG:
         # Create custom retriever with better configuration
         self.retriever = VectorIndexRetriever(
             index=self.index,
-            similarity_top_k=20,  # Retrieve more candidates initially
+            similarity_top_k=10,  # Retrieve more candidates initially
         )
         
         # Create query engine directly from retriever (avoids conflict with as_query_engine)
@@ -312,7 +312,7 @@ class TaxCodeRAG:
         # Create vector store (in-memory, but using LlamaIndex abstraction)
         vector_store = SimpleVectorStore()
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        
+        storage_context.docstore.add_documents(nodes)
         # Build index from nodes
         index = VectorStoreIndex(
             nodes=nodes,

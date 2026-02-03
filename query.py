@@ -9,7 +9,34 @@ from typing import List
 from rag import TaxCodeRAG
 from llama_index.llms.ollama import Ollama
 import traceback
+
 rag = None
+REFRAME_PROMPT = """You are a precise legal research assistant.
+Rephrase the user query into 3 alternative search queries that preserve the original meaning,
+use legal/tax terminology where helpful, and avoid adding new facts.
+
+Return ONLY a JSON array of exactly 3 strings. No extra text.
+
+User query:
+{question}
+"""
+
+EXPANSION_PROMPT = """
+You are helping to improve a search query for finding information in the US Tax Code (Title 26).
+
+Original question: {question}
+
+Generate an improved search query that:
+1. Includes key tax code terminology (e.g., "taxable income", "filing status", "tax brackets", "standard deduction")
+2. Expands abbreviations (e.g., "MFS" -> "married filing separately")
+3. Adds related terms (e.g., "tax rate" for "how much am I taxed")
+4. Keeps the core intent of the question
+5. If a specific section is asked for in the original query, make sure to include that section number
+6. Evaluate key phrases and terms in the search query. If there is something ambiguous, rephrase it with your best interpretation of what the user is trying to ask given the context.
+7. Focus on the terms that actually matter to the user's question. If the user is asking about a specific section, focus on that section. If the user is asking about a specific term, focus on that term. Do not focus on arbitrary terms or numbers that are not going to be present in the most relevant chunks to the query.
+
+Return ONLY the improved search query, nothing else:
+"""
 
 
 def get_rag(index_name: str = None, chunks_file: str = None):
@@ -48,32 +75,6 @@ def get_rag(index_name: str = None, chunks_file: str = None):
             index_dir=str(index_dir)
         )
     return rag
-
-
-REFRAME_PROMPT = """You are a precise legal research assistant.
-Rephrase the user query into 3 alternative search queries that preserve the original meaning,
-use legal/tax terminology where helpful, and avoid adding new facts.
-
-Return ONLY a JSON array of exactly 3 strings. No extra text.
-
-User query:
-{question}
-"""
-
-EXPANSION_PROMPT = """You are helping to improve a search query for finding information in the US Tax Code (Title 26).
-
-        Original question: {question}
-
-        Generate an improved search query that:
-        1. Includes key tax code terminology (e.g., "taxable income", "filing status", "tax brackets", "standard deduction")
-        2. Expands abbreviations (e.g., "MFS" -> "married filing separately")
-        3. Adds related terms (e.g., "tax rate" for "how much am I taxed")
-        4. Keeps the core intent of the question
-        5. If a specific section is asked for in the original query, make sure to include that section number
-        6. Evaluate key phrases and terms in the search query. If there is something ambiguous, rephrase it with your best interpretation of what the user is trying to ask given the context.
-        7. Focus on the terms that actually matter to the user's question. If the user is asking about a specific section, focus on that section. If the user is asking about a specific term, focus on that term. Do not focus on arbitrary terms or numbers that are not going to be present in the most relevant chunks to the query.
-
-        Return ONLY the improved search query, nothing else:"""
 
 def reframe_query(question: str, model: str = "llama3.1:8b", base_url: str = "http://localhost:11434") -> List[str]:
     """Generate three re-phrased queries using Llama 3.1."""
@@ -161,9 +162,8 @@ def query(rag: TaxCodeRAG,
         merged.sort(key=lambda n: getattr(n, "score", None) or float("-inf"), reverse=True)
         retrieved_nodes = merged[:top_k]
         retrieval_time = time.time() - start
-        print(f"\n✓ Retrieved {len(retrieved_nodes)} relevant chunks in {retrieval_time:.3f}s (embedding search)")
-        print("\n" + "="*80)
-        
+        print(f"\n[Retrieval] {retrieval_time:.3f}s — {len(retrieved_nodes)} chunks")
+        print("="*80)
 
         if retrieve_only: # return retrieved chunks without trying to formulate an answer
             return {
@@ -171,15 +171,15 @@ def query(rag: TaxCodeRAG,
                 'sources': [rag._format_source(node) for node in retrieved_nodes]
             }
         
-        # Then generate answer with LLM using expanded query (this can be slow and cause timeouts)
+        # Then generate answer with LLM (this can be slow and cause timeouts)
         print("\nGenerating answer with LLM...")
         try:
-            # Use the expanded query for better context
+            gen_start = time.time()
             response = rag.query_engine.query(question)
-            
+            generation_time = time.time() - gen_start
+            print(f"[Generation] {generation_time:.3f}s")
             total_time = time.time() - start
-            llm_time = total_time - retrieval_time
-            print(f"✓ Total time: {total_time:.2f}s (search: {retrieval_time:.3f}s, LLM: {llm_time:.2f}s)")
+            print(f"[Total] {total_time:.3f}s (retrieval: {retrieval_time:.3f}s, generation: {generation_time:.3f}s)")
         except Exception as e:
             print(f"\n⚠️  LLM generation failed: {e}")
             print("But we successfully retrieved the chunks above - the embedding search is working!")
@@ -190,112 +190,20 @@ def query(rag: TaxCodeRAG,
             }
         
         # Extract answer
-        answer = str(response)
-        
-        result = {'answer': answer}
-        
-        # Add source citations if requested
-        if include_sources and hasattr(response, 'source_nodes'):
-            result['sources'] = [rag._format_source(node, preview_length=200) for node in response.source_nodes[:5]]
-        
+        result = {'answer': str(response), 'sources': [rag._format_source(node, preview_length=200) for node in response.source_nodes[:5]]}
         return result
     
 
 def handle_query(data: dict) -> tuple[dict, int]:
     """Handle query requests and return (payload, status_code)."""
-    try:
-        question = data.get('question', '').strip()
-        retrieve_only = data.get('retrieve_only', False)
+    question = data.get('question', '').strip()
+    if not question:
+        return {'error': 'Question is required', 'sources': []}, 400
 
-        if not question:
-            return {'error': 'Question is required'}, 400
+    rag_system = get_rag()
+    query_engine = rag_system.index.as_query_engine(
+        include_text=True, response_mode="tree_summarize", retriever_mode='hybrid'
+    )
+    result = query_engine.query(question)
 
-        rag_system = get_rag()
-
-        # Get optional parameters
-        expand = data.get('expand', True)  # Enable query expansion by default
-        top_k = data.get('top_k', 5)  # Number of chunks to retrieve
-
-        # Query the RAG system with improved retrieval
-        if retrieve_only:
-            # Just retrieve chunks without LLM (uses improved retrieval with query expansion)
-            result = query(
-                rag_system,
-                question,
-                retrieve_only=True,
-                expand=expand,
-                top_k=top_k,
-            )
-
-            chunks = []
-            for source in result.get('sources', []):
-                chunks.append({
-                    'id': source.get('id'),
-                    'text': source.get('text', source.get('text_preview', '')),  # Use full text, fallback to preview
-                    'score': source.get('score'),
-                    'metadata': source.get('metadata', {})
-                })
-
-            return {
-                'answer': result.get('answer', ''),
-                'chunks': chunks,
-                'retrieve_only': True,
-            }, 200
-        else:
-            # Full query with LLM (uses improved retrieval with query expansion)
-            try:
-                result = query(
-                    rag_system,
-                    question,
-                    include_sources=True,
-                    expand=expand,
-                    top_k=top_k,
-                )
-
-                # Extract chunks from sources
-                chunks = []
-                for source in result.get('sources', []):
-                    chunks.append({
-                        'id': source.get('id'),
-                        'text': source.get('text', source.get('text_preview', '')),  # Use full text, fallback to preview
-                        'score': source.get('score'),
-                        'metadata': source.get('metadata', {})
-                    })
-
-                return {
-                    'answer': result.get('answer', ''),
-                    'sources': result.get('sources', []),
-                    'chunks': chunks,
-                }, 200
-            except Exception as e:
-                # If LLM times out, still try to retrieve chunks
-                try:
-                    retrieve_result = query(
-                        rag_system,
-                        question,
-                        retrieve_only=True,
-                        top_k=top_k,
-                    )
-                    chunks = []
-                    for source in retrieve_result.get('sources', []):
-                        chunks.append({
-                            'id': source.get('id'),
-                            'text': source.get('text', source.get('text_preview', '')),  # Use full text, fallback to preview
-                            'score': source.get('score'),
-                            'metadata': source.get('metadata', {})
-                        })
-                    return {
-                        'answer': f'Retrieved relevant chunks, but LLM generation failed: {str(e)}',
-                        'sources': [],
-                        'chunks': chunks,
-                        'error': str(e),
-                    }, 200
-                except Exception as e2:
-                    return {
-                        'error': f'Both retrieval and LLM failed: {str(e2)}'
-                    }, 500
-
-    except Exception as e:
-        error_msg = str(e)
-        traceback.print_exc()
-        return {'error': error_msg}, 500
+    return {'answer': result.response, 'sources': [rag._format_source(node, preview_length=200) for node in result.source_nodes[:5]]}, 200
