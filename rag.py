@@ -7,19 +7,23 @@ import json
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import tiktoken
+import chromadb
+
 
 from llama_index.core import (
     VectorStoreIndex,
-    StorageContext,
+    # StorageContext,
     Settings,
-    load_index_from_storage,
+    # load_index_from_storage,
 )
 from llama_index.core.schema import TextNode
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.vector_stores import SimpleVectorStore
+# from llama_index.core.vector_stores import SimpleVectorStore
+from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
+
 
 
 class TaxCodeRAG:
@@ -51,16 +55,7 @@ class TaxCodeRAG:
         """
         data_dir = Path(__file__).parent / "data"
         self.chunks_path = Path(chunks_path) if chunks_path else data_dir / "rag_chunks2.json"
-        if index_dir:
-            self.index_dir = Path(index_dir)
-        else:
-            # Prefer the newer named index directory, but fall back to legacy `data/index`
-            default_index_dir = data_dir / "index_rag_chunks2"
-            legacy_index_dir = data_dir / "index"
-            if default_index_dir.exists() or not legacy_index_dir.exists():
-                self.index_dir = default_index_dir
-            else:
-                self.index_dir = legacy_index_dir
+        self.index_dir = Path(index_dir) if index_dir else data_dir / "index_rag_chunks2"
         self.ollama_model = ollama_model
         self.ollama_base_url = ollama_base_url
         
@@ -82,6 +77,13 @@ class TaxCodeRAG:
         print(f"Initializing Ollama LLM: {ollama_model}")
         Settings.llm = Ollama(model=ollama_model, base_url=ollama_base_url, request_timeout=120.0)
         
+
+        # Initialize Chroma client (path fixed relative to this file so cwd doesn't matter)
+        chroma_path = Path(__file__).parent / "data" / "chroma_db"
+        chroma_path.mkdir(parents=True, exist_ok=True)
+        print("Initializing Chroma client")
+        self.chroma_client = chromadb.PersistentClient(path=str(chroma_path))
+
         # Load or build index (auto_build=True for backward compatibility)
         # Set auto_build=False if you want to require pre-built indexes
         self.index = self._load_or_build_index(auto_build=True)
@@ -309,22 +311,31 @@ class TaxCodeRAG:
         
         print(f"Converted {len(nodes)} chunks to nodes")
         
-        # Create vector store (in-memory, but using LlamaIndex abstraction)
-        vector_store = SimpleVectorStore()
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        storage_context.docstore.add_documents(nodes)
-        # Build index from nodes
+        # # Create vector store (in-memory, but using LlamaIndex abstraction)
+        # vector_store = SimpleVectorStore()
+        # storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        # storage_context.docstore.add_documents(nodes)
+        # # Build index from nodes
+        # index = VectorStoreIndex(
+        #     nodes=nodes,
+        #     storage_context=storage_context,
+        #     show_progress=True,
+        # )
+        
+        # Chroma: create collection and empty vector store, then index inserts nodes (with embeddings)
+        chroma_collection = self.chroma_client.get_or_create_collection("tax_code_rag")
+        vector_store = ChromaVectorStore(
+            chroma_collection=chroma_collection,
+            client=self.chroma_client,
+        )
         index = VectorStoreIndex(
             nodes=nodes,
-            storage_context=storage_context,
+            vector_store=vector_store,
+            embed_model=Settings.embed_model,
             show_progress=True,
         )
-        
-        # Save index
-        print(f"Saving index to {self.index_dir}")
-        self.index_dir.mkdir(parents=True, exist_ok=True)
-        index.storage_context.persist(persist_dir=str(self.index_dir))
-        
+        # Chroma already persists to disk via PersistentClient; no storage_context.persist needed
+        print("Index saved to Chroma (data/chroma_db)")
         return index
     
     def _load_or_build_index(self, auto_build: bool = True) -> VectorStoreIndex:
@@ -335,32 +346,48 @@ class TaxCodeRAG:
             auto_build: If True, automatically build if index doesn't exist.
                        If False, raise error if index doesn't exist.
         """
-        if self.index_dir.exists() and any(self.index_dir.iterdir()):
-            try:
-                print(f"Loading existing index from {self.index_dir}")
-                storage_context = StorageContext.from_defaults(persist_dir=str(self.index_dir))
-                index = load_index_from_storage(storage_context)
-                print("Index loaded successfully")
-                return index
-            except Exception as e:
-                print(f"Failed to load index: {e}")
-                if auto_build:
-                    print("Building new index...")
-                    return self._build_index()
-                else:
-                    raise FileNotFoundError(
-                        f"Index not found at {self.index_dir}. "
-                        f"Please build it first using: python index.py build <chunks_file>"
-                    ) from e
+        chroma_collection = self.chroma_client.get_or_create_collection("tax_code_rag")
+        if chroma_collection.count() == 0:
+            print("No existing Chroma index. Building new index...")
+            return self._build_index()
         else:
-            if auto_build:
-                print("No existing index found. Building new index...")
-                return self._build_index()
-            else:
-                raise FileNotFoundError(
-                    f"Index not found at {self.index_dir}. "
-                    f"Please build it first using: python index.py build <chunks_file>"
-                )
+            print(f"Loading existing Chroma index ({chroma_collection.count()} vectors)")
+            vector_store = ChromaVectorStore(
+                chroma_collection=chroma_collection,
+                client=self.chroma_client,
+            )
+            index = VectorStoreIndex.from_vector_store(
+                vector_store,
+                embed_model=Settings.embed_model,
+            )
+            return index
+        
+        # if self.index_dir.exists() and any(self.index_dir.iterdir()):
+        #     try:
+        #         print(f"Loading existing index from {self.index_dir}")
+        #         storage_context = StorageContext.from_defaults(persist_dir=str(self.index_dir))
+        #         index = load_index_from_storage(storage_context)
+        #         print("Index loaded successfully")
+        #         return index
+        #     except Exception as e:
+        #         print(f"Failed to load index: {e}")
+        #         if auto_build:
+        #             print("Building new index...")
+        #             return self._build_index()
+        #         else:
+        #             raise FileNotFoundError(
+        #                 f"Index not found at {self.index_dir}. "
+        #                 f"Please build it first using: python index.py build <chunks_file>"
+        #             ) from e
+        # else:
+        #     if auto_build:
+        #         print("No existing index found. Building new index...")
+        #         return self._build_index()
+        #     else:
+        #         raise FileNotFoundError(
+        #             f"Index not found at {self.index_dir}. "
+        #             f"Please build it first using: python index.py build <chunks_file>"
+        #         )
     
     def rebuild_index(self, force: bool = False):
         """
@@ -370,17 +397,17 @@ class TaxCodeRAG:
             force: If True, delete existing index without prompting
         """
         print("Rebuilding index...")
-        # Remove existing index
-        import shutil
-        if self.index_dir.exists() and any(self.index_dir.iterdir()):
-            if not force:
-                print(f"⚠️  Existing index found at {self.index_dir}")
-                response = input("Delete and rebuild? (y/N): ").strip().lower()
-                if response != 'y':
-                    print("Aborted.")
-                    return
-            shutil.rmtree(self.index_dir)
-        
+        if not force:
+            response = input("Delete existing index and rebuild? (y/N): ").strip().lower()
+            if response != 'y':
+                print("Aborted.")
+                return
+        try:
+            self.chroma_client.delete_collection("tax_code_rag")
+            print("Deleted existing Chroma collection.")
+        except Exception as e:
+            print(f"No existing collection or error: {e}")
+
         # Build new index
         self.index = self._build_index()
         self.retriever = VectorIndexRetriever(

@@ -117,4 +117,4 @@ def handle_query(data: dict) -> tuple[dict, int]:
     result = query_engine.query(question)
     end = time.time()
     print(f"Time taken to query: {end - start} seconds")
-    return {'answer': result.response, 'sources': [rag_system.format_source(node, preview_length=200) for node in result.source_nodes[:5]]}, 200
+    return {'answer': result.response, 'sources': [rag_system.format_source(node, preview_length=200) for node in result.source_nodes]}, 200

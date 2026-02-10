@@ -16,7 +16,7 @@ flask>=3.0.0
 # Token counting for chunking
 tiktoken>=0.5.0
 
-# Optional: For future vector database migration
-# chromadb>=0.4.0
-# qdrant-client>=1.7.0
+# Local vector store: fast connect, no full index load (good for hotspot/demos)
+chromadb>=0.4.0
+llama-index-vector-stores-chroma>=0.2.0
 
