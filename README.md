@@ -17,40 +17,36 @@ This project includes tools for parsing and chunking the US Code Title 26 (Inter
 ### Usage
 
 1. **Parse the XML file:**
-
-   ```bash
+  ```bash
    python ingest.py
-   ```
-
+  ```
    This will:
-   - Parse the XML file and extract hierarchical chunks
-   - Preserve parent/child relationships
-   - Split large chunks into smaller ones suitable for RAG
-   - Generate two output files in the `data/` folder:
-     - `data/chunks.json`: Raw parsed chunks with full hierarchy
-     - `data/rag_chunks.json`: Chunks optimized for RAG ingestion
+  - Parse the XML file and extract hierarchical chunks
+  - Preserve parent/child relationships
+  - Split large chunks into smaller ones suitable for RAG
+  - Generate two output files in the `data/` folder:
+    - `data/chunks.json`: Raw parsed chunks with full hierarchy
+    - `data/rag_chunks.json`: Chunks optimized for RAG ingestion
 
 ### How It Works
 
 1. **XML Parsing**: The parser uses `lxml` to parse the USLM (US Legislative Markup) XML format, extracting:
-   - Sections, subsections, paragraphs, and other structural elements
-   - Text content with proper hierarchy
-   - Identifiers (section numbers, etc.)
-   - Parent/child relationships
-
+  - Sections, subsections, paragraphs, and other structural elements
+  - Text content with proper hierarchy
+  - Identifiers (section numbers, etc.)
+  - Parent/child relationships
 2. **Chunking**: Large chunks are split into smaller pieces (default 1000 characters) while:
-   - Preserving parent/child relationships
-   - Maintaining context through overlap
-   - Keeping metadata for each chunk
-
+  - Preserving parent/child relationships
+  - Maintaining context through overlap
+  - Keeping metadata for each chunk
 3. **Output Format**: Each chunk includes:
-   - `id`: Unique identifier
-   - `text`: The text content
-   - `metadata`: Additional information including:
-     - `parent_id`: ID of parent chunk
-     - `children_ids`: List of child chunk IDs
-     - `element_type`: Type of XML element (section, subsection, etc.)
-     - `identifier`: Section number or other identifier
+  - `id`: Unique identifier
+  - `text`: The text content
+  - `metadata`: Additional information including:
+    - `parent_id`: ID of parent chunk
+    - `children_ids`: List of child chunk IDs
+    - `element_type`: Type of XML element (section, subsection, etc.)
+    - `identifier`: Section number or other identifier
 
 ## RAG Query System
 
@@ -59,52 +55,24 @@ The project includes a RAG (Retrieval-Augmented Generation) system for querying 
 ### Setup
 
 1. **Install dependencies:**
-
-   ```bash
+  ```bash
    pip install -r requirements.txt
-   ```
-
+  ```
 2. **Install and start Ollama:**
-
-   - Download from <https://ollama.ai>
-   - Pull the Llama 3.1 model:
-
-     ```bash
-     ollama pull llama3.1
-     ```
-
-   - Make sure Ollama is running (it should start automatically)
-
+  - Download from [https://ollama.ai](https://ollama.ai)
+  - Pull the Llama 3.1 model:
+    ```bash
+    ollama pull llama3.1
+    ```
+  - Make sure Ollama is running (it should start automatically)
 3. **Build the index:**
-
-   You can build indexes independently using the `index.py` script with the `build` subcommand:
-
-   ```bash
-   # Build index from rag_chunks2.json
-   python index.py build data/rag_chunks2.json
-   
-   # Build with custom index name
-   python index.py build data/rag_chunks2.json --index-name my_index
-   
-   # Build from different chunks file
-   python index.py build data/rag_chunks.json --index-name rag_chunks
-   
-   # Force rebuild existing index
-   python index.py build data/rag_chunks2.json --force
-   
-   # List all available indexes
-   python index.py list
-   ```
-
+  You can build indexes independently using the `index.py` script with the `build` subcommand:
    Indexes are stored in `data/index_<name>/` directories. The first time you run the app, it will automatically build an index if none exists, but it's recommended to build indexes explicitly using the build command.
-
 4. **Start the web application:**
-
-   ```bash
+  ```bash
    python app.py
-   ```
-
-   Then open your browser to <http://localhost:5000> to access the query interface.
+  ```
+   Then open your browser to [http://localhost:5000](http://localhost:5000) to access the query interface.
 
 ### Querying the RAG System
 
@@ -132,14 +100,12 @@ python app.py --chunks-file data/rag_chunks.json
 ### RAG System Architecture
 
 1. **Indexing**: The system loads chunks from `data/rag_chunks.json` and creates embeddings using a HuggingFace model (BAAI/bge-small-en-v1.5 by default).
-
 2. **Querying**: When you ask a question:
-   - The system finds the most relevant chunks using semantic search
-   - Retrieves top 5 relevant chunks with their metadata (section numbers, headings)
-   - Formats context with section identifiers and parent/child relationships
-   - Sends to Llama 3.1 via Ollama for answer generation
-   - Returns answer with source citations
-
+  - The system finds the most relevant chunks using semantic search
+  - Retrieves top 5 relevant chunks with their metadata (section numbers, headings)
+  - Formats context with section identifiers and parent/child relationships
+  - Sends to Llama 3.1 via Ollama for answer generation
+  - Returns answer with source citations
 3. **Metadata Context**: The system includes section numbers, headings, and hierarchical relationships in the context to provide better answers.
 
 ### Configuration
@@ -148,7 +114,7 @@ You can customize the system by modifying parameters in `index.py`:
 
 - `embedding_model`: Change the embedding model (default: "BAAI/bge-small-en-v1.5")
 - `ollama_model`: Change the Ollama model (default: "llama3.1")
-- `ollama_base_url`: Change Ollama server URL (default: <http://localhost:11434>)
+- `ollama_base_url`: Change Ollama server URL (default: [http://localhost:11434](http://localhost:11434))
 - `similarity_top_k`: Number of chunks to retrieve (default: 5)
 
 ### Using Multiple Indexes
@@ -159,10 +125,10 @@ You can build multiple indexes from different chunk files and choose which one t
 
 ```bash
 # Build index from rag_chunks.json
-python index.py build data/rag_chunks.json --index-name rag_chunks
+python rag.py build data/rag_chunks.json --index-name rag_chunks
 
 # Build index from rag_chunks2.json  
-python index.py build data/rag_chunks2.json --index-name rag_chunks2
+python rag.py build data/rag_chunks2.json --index-name rag_chunks2
 ```
 
 **Use a specific index in the app:**
@@ -224,3 +190,4 @@ Core dependencies:
 - `llama-index`: RAG framework
 - `llama-index-embeddings-huggingface`: Embeddings
 - `ollama`: Local LLM inference
+

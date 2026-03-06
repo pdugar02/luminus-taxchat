@@ -38,7 +38,7 @@ class TaxCodeRAG:
         self,
         chunks_path: Optional[str] = None,
         index_dir: Optional[str] = None,
-        embedding_model: str = "embeddinggemma",
+        embedding_model: str = "nomic-custom", # "nomic-embed-text", "embeddinggemma"
         ollama_model: str = "llama3.1:8b",  # Use the model tag you pulled (e.g., llama3.1:8b)
         ollama_base_url: str = "http://localhost:11434",
     ):
@@ -48,7 +48,7 @@ class TaxCodeRAG:
         Args:
             chunks_path: Path to chunks json file
             index_dir: Directory to save/load index (default: ./data/index)
-            embedding_model: Ollama model name for embeddings (default: nomic-embed-text)
+            embedding_model: Ollama model name for embeddings (default: nomic-custom)
             ollama_model: Ollama model name for LLM (default: llama3.1:8b)
                             Use the exact model name you pulled, including tags like :8b
             ollama_base_url: Ollama server URL
@@ -56,6 +56,11 @@ class TaxCodeRAG:
         data_dir = Path(__file__).parent / "data"
         self.chunks_path = Path(chunks_path) if chunks_path else data_dir / "rag_chunks2.json"
         self.index_dir = Path(index_dir) if index_dir else data_dir / "index_rag_chunks2"
+        # Resolve to absolute path so Chroma always uses the same DB regardless of process cwd
+        if not self.index_dir.is_absolute():
+            self.index_dir = (Path(__file__).parent / self.index_dir).resolve()
+        else:
+            self.index_dir = self.index_dir.resolve()
         self.ollama_model = ollama_model
         self.ollama_base_url = ollama_base_url
         
@@ -78,11 +83,14 @@ class TaxCodeRAG:
         Settings.llm = Ollama(model=ollama_model, base_url=ollama_base_url, request_timeout=120.0)
         
 
-        # Initialize Chroma client (path fixed relative to this file so cwd doesn't matter)
-        chroma_path = Path(__file__).parent / "data" / "chroma_db"
+        # Chroma stores the index in index_dir so that --index-name controls save location.
+        # In that dir, chroma.sqlite3 holds metadata; embeddings live in segment subdirs (not in SQLite).
+        # Use resolved absolute path so build and app always share the same DB for a given index name.
+        chroma_path = self.index_dir
         chroma_path.mkdir(parents=True, exist_ok=True)
-        print("Initializing Chroma client")
-        self.chroma_client = chromadb.PersistentClient(path=str(chroma_path))
+        chroma_path_str = str(chroma_path)
+        print(f"Chroma DB path (absolute): {chroma_path_str}")
+        self.chroma_client = chromadb.PersistentClient(path=chroma_path_str)
 
         # Load or build index (auto_build=True for backward compatibility)
         # Set auto_build=False if you want to require pre-built indexes
@@ -117,14 +125,18 @@ class TaxCodeRAG:
     def format_source(self, node, preview_length: int = 300) -> Dict:
         """Format a node as a source dictionary."""
         metadata = node.metadata if hasattr(node, 'metadata') else {}
+        ident = metadata.get('identifier')
+        identifiers = metadata.get('identifiers')
+        if identifiers is None and ident is not None:
+            identifiers = [ident]
         return {
             'id': node.node_id,
             'text': self._get_node_text(node),
             'text_preview': node.text[:preview_length] + '...' if len(node.text) > preview_length else node.text,
             'score': getattr(node, 'score', None),
             'metadata': {
-                'identifier': metadata.get('identifier'),
-                'identifiers': metadata.get('identifiers', []),
+                'identifier': ident,
+                'identifiers': identifiers or [],
                 'heading': metadata.get('heading'),
                 'tag': metadata.get('tag'),
             } if metadata else {}
@@ -176,17 +188,14 @@ class TaxCodeRAG:
         metadata = chunk.get('metadata', {})
         chunk_id = chunk.get('id', 'unknown')
         
-        # Build metadata (identifiers = list of section ids for single or merged chunks)
+        # Keep metadata minimal: LlamaIndex embeds metadata_str + "\n\n" + text, so long
+        # lists (identifiers, children_ids) blow the embedding context window (e.g. nomic-embed-text).
+        # Store only short, scalar fields; format_source derives identifiers from identifier when needed.
         node_metadata = {
             'id': chunk_id,
             'tag': metadata.get('tag'),
             'identifier': metadata.get('identifier'),
-            'identifiers': metadata.get('identifiers', []),
-            'heading': metadata.get('heading'),
-            'parent_id': metadata.get('parent_id'),
-            'children_ids': metadata.get('children_ids', []),
-            'element_id': metadata.get('element_id'),
-            'chunk_index': metadata.get('chunk_index'),
+            'heading': (metadata.get('heading') or '')[:500],  # cap heading length
         }
         
         # Build prefix from identifier(s) and heading
@@ -199,70 +208,42 @@ class TaxCodeRAG:
         prefix = f"{' '.join(prefix_parts)}: " if prefix_parts else ""
         
         # Calculate available tokens for text (reserve for prefix + marker)
-        truncation_marker = "\n\n[Text truncated for embedding]"
         prefix_tokens = len(self.token_encoder.encode(prefix)) if prefix else 0
-        marker_tokens = len(self.token_encoder.encode(truncation_marker))
-        reserved_tokens = prefix_tokens + marker_tokens
+        reserved_tokens = prefix_tokens
         
         # Build full text with prefix first to check total size
         full_text_with_prefix = prefix + original_text
         full_tokens = self.token_encoder.encode(full_text_with_prefix)
         
         # Check if we need truncation
-        if len(full_tokens) > self.MAX_EMBEDDING_TOKENS:
+        limit = getattr(self, "_embedding_context_limit", self.MAX_EMBEDDING_TOKENS)
+        if len(full_tokens) > limit:
             # Need to truncate - calculate how much of original_text we can keep
             # Account for prefix + marker
-            max_text_tokens = self.MAX_EMBEDDING_TOKENS - reserved_tokens
+            max_text_tokens = limit - reserved_tokens
             
             # Truncate original text
             truncated_text, trunc_meta = self._truncate_text(original_text, max_text_tokens, chunk_id)
-            node_metadata.update(trunc_meta)
             
             # Build final text
-            text = prefix + truncated_text + truncation_marker
+            text = prefix + truncated_text
             
             # CRITICAL: Re-check final token count and truncate more if needed
             final_tokens = self.token_encoder.encode(text)
-            if len(final_tokens) > self.MAX_EMBEDDING_TOKENS:
+            if len(final_tokens) > limit:
                 # Still too long - need more aggressive truncation
                 # Remove excess tokens from the truncated_text
-                excess = len(final_tokens) - self.MAX_EMBEDDING_TOKENS
+                excess = len(final_tokens) - limit
                 truncated_text_tokens = self.token_encoder.encode(truncated_text)
                 
                 if len(truncated_text_tokens) > excess:
                     # Remove excess tokens
                     truncated_text_tokens = truncated_text_tokens[:len(truncated_text_tokens) - excess]
                     truncated_text = self.token_encoder.decode(truncated_text_tokens)
-                    text = prefix + truncated_text + truncation_marker
-                    
-                    # Verify again
-                    final_tokens = self.token_encoder.encode(text)
-                    if len(final_tokens) > self.MAX_EMBEDDING_TOKENS:
-                        # Last resort: hard truncate the entire text (prefix + truncated + marker)
-                        emergency_tokens = self.token_encoder.encode(text)[:self.MAX_EMBEDDING_TOKENS]
-                        text = self.token_encoder.decode(emergency_tokens)
-                        node_metadata['emergency_truncated'] = True
-                else:
-                    # Can't fit even without truncated_text - just use prefix (shouldn't happen)
-                    text = prefix
-                    node_metadata['emergency_truncated'] = True
+                    text = prefix + truncated_text
         else:
             # Text fits without truncation
             text = full_text_with_prefix
-        
-        # Final validation: ensure UTF-8 and under limit
-        try:
-            text.encode('utf-8')
-            final_count = len(self.token_encoder.encode(text))
-            if final_count > self.MAX_EMBEDDING_TOKENS:
-                # Absolute last resort
-                print(f"WARNING: Chunk {chunk_id} still exceeds limit ({final_count} tokens). Hard truncating.")
-                final_tokens = self.token_encoder.encode(text)[:self.MAX_EMBEDDING_TOKENS]
-                text = self.token_encoder.decode(final_tokens)
-                node_metadata['hard_truncated'] = True
-        except (UnicodeDecodeError, UnicodeEncodeError) as e:
-            print(f"WARNING: Encoding error in chunk {chunk_id}: {e}. Fixing.")
-            text = text.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
 
         # Exclude large metadata from what gets embedded: VectorStoreIndex embeds
         # node.get_content(metadata_mode=MetadataMode.EMBED) = metadata_str + "\n\n" + text.
@@ -278,9 +259,9 @@ class TaxCodeRAG:
         print("Building index from chunks...")
         chunks = self._load_chunks()
         
-        # Convert chunks to nodes with progress tracking
-        context_limit = self.MAX_EMBEDDING_TOKENS
-        truncate_to = getattr(self, 'EMBEDDING_TRUNCATE_TOKENS', context_limit)
+        # Convert chunks to nodes with progress tracking (use model-specific limit for nomic)
+        context_limit = getattr(self, "_embedding_context_limit", self.MAX_EMBEDDING_TOKENS)
+        truncate_to = getattr(self, "_embedding_truncate_to", self.EMBEDDING_TRUNCATE_TOKENS)
         nodes = []
         for i, chunk in enumerate(chunks):
             try:
@@ -311,17 +292,6 @@ class TaxCodeRAG:
         
         print(f"Converted {len(nodes)} chunks to nodes")
         
-        # # Create vector store (in-memory, but using LlamaIndex abstraction)
-        # vector_store = SimpleVectorStore()
-        # storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        # storage_context.docstore.add_documents(nodes)
-        # # Build index from nodes
-        # index = VectorStoreIndex(
-        #     nodes=nodes,
-        #     storage_context=storage_context,
-        #     show_progress=True,
-        # )
-        
         # Chroma: create collection and empty vector store, then index inserts nodes (with embeddings)
         chroma_collection = self.chroma_client.get_or_create_collection("tax_code_rag")
         vector_store = ChromaVectorStore(
@@ -335,7 +305,7 @@ class TaxCodeRAG:
             show_progress=True,
         )
         # Chroma already persists to disk via PersistentClient; no storage_context.persist needed
-        print("Index saved to Chroma (data/chroma_db)")
+        print(f"Index saved to Chroma ({self.index_dir})")
         return index
     
     def _load_or_build_index(self, auto_build: bool = True) -> VectorStoreIndex:
@@ -361,33 +331,6 @@ class TaxCodeRAG:
                 embed_model=Settings.embed_model,
             )
             return index
-        
-        # if self.index_dir.exists() and any(self.index_dir.iterdir()):
-        #     try:
-        #         print(f"Loading existing index from {self.index_dir}")
-        #         storage_context = StorageContext.from_defaults(persist_dir=str(self.index_dir))
-        #         index = load_index_from_storage(storage_context)
-        #         print("Index loaded successfully")
-        #         return index
-        #     except Exception as e:
-        #         print(f"Failed to load index: {e}")
-        #         if auto_build:
-        #             print("Building new index...")
-        #             return self._build_index()
-        #         else:
-        #             raise FileNotFoundError(
-        #                 f"Index not found at {self.index_dir}. "
-        #                 f"Please build it first using: python index.py build <chunks_file>"
-        #             ) from e
-        # else:
-        #     if auto_build:
-        #         print("No existing index found. Building new index...")
-        #         return self._build_index()
-        #     else:
-        #         raise FileNotFoundError(
-        #             f"Index not found at {self.index_dir}. "
-        #             f"Please build it first using: python index.py build <chunks_file>"
-        #         )
     
     def rebuild_index(self, force: bool = False):
         """
@@ -479,8 +422,7 @@ def list_indexes():
 def build_index_cmd(
     chunks_file: str,
     index_name: str = None,
-    # embedding_model: str = "nomic-embed-text",
-    embedding_model: str = "embeddinggemma",
+    embedding_model: str = "nomic-custom", # "nomic-embed-text", "embeddinggemma"
     ollama_base_url: str = "http://localhost:11434",
     force_rebuild: bool = False
 ):
@@ -490,9 +432,10 @@ def build_index_cmd(
         print(f"Error: Chunks file not found: {chunks_file}")
         return
     
-    # Use TaxCodeRAG method to determine index directory
+    # Use TaxCodeRAG method to determine index directory (resolve to absolute for consistency)
     index_dir = TaxCodeRAG.get_index_dir_from_chunks(chunks_file, index_name)
-    
+    index_dir = index_dir.resolve()
+
     print("="*80)
     print("Building Index")
     print("="*80)
@@ -546,9 +489,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
         Examples:
-        python index.py build data/rag_chunks2.json
-        python index.py build data/rag_chunks2.json --index-name my_index --force
-        python index.py list
+        python rag.py build
+        python rag.py build data/rag_chunks2.json
+        python rag.py build data/rag_chunks2.json --index-name my_index --force
+        python rag.py list
         """
     )
     
@@ -556,9 +500,14 @@ def main():
     
     # Build command
     build_parser = subparsers.add_parser('build', help='Build a vector index from chunks')
-    build_parser.add_argument('chunks_file', help='Path to chunks JSON file')
-    build_parser.add_argument('--index-name', type=str, help='Name for the index directory')
-    build_parser.add_argument('--embedding-model', type=str, default='embeddinggemma', help='Ollama embedding model')
+    build_parser.add_argument(
+        'chunks_file',
+        nargs='?',
+        default='data/rag_chunks2.json',
+        help='Path to chunks JSON file (default: data/rag_chunks2.json)',
+    )
+    build_parser.add_argument('--index-name', type=str, default='rag_chunks2', help='Name for the index directory')
+    build_parser.add_argument('--embedding-model', type=str, default='nomic-custom', help='Ollama embedding model')
     build_parser.add_argument('--ollama-base-url', type=str, default='http://localhost:11434', help='Ollama server URL')
     build_parser.add_argument('--force', action='store_true', help='Force rebuild even if index exists')
     
