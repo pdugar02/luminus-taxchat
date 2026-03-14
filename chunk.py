@@ -2,13 +2,17 @@
 Structure-first chunking utilities for tax code / legal authority RAG.
 Chunks by legal boundaries (paragraph/subparagraph) first, then adjusts by token count.
 Uses tiktoken for accurate token counting.
-Target: 300-700 tokens per chunk (sweet spot)
+Target: 300-700 tokens per chunk (sweet spot).
+Hard cap: no chunk may exceed MAX_CHUNK_TOKENS (context-size safety).
 """
 
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 import re
 import tiktoken
+
+# Hard token cap for any single chunk (must not exceed embedding/context limits).
+MAX_CHUNK_TOKENS = 1900
 
 
 @dataclass
@@ -38,6 +42,7 @@ class StructureFirstChunker:
         max_tokens: int = 700,
         split_threshold: int = 700,  # Split if >700 tokens (not 1000!)
         chunk_overlap: int = 50,
+        max_chunk_tokens: int = MAX_CHUNK_TOKENS,
     ):
         """
         Initialize chunker.
@@ -47,6 +52,7 @@ class StructureFirstChunker:
         self.max_tokens = max_tokens
         self.split_threshold = split_threshold
         self.chunk_overlap = chunk_overlap
+        self.max_chunk_tokens = max_chunk_tokens
         self.encoder = tiktoken.get_encoding("cl100k_base")
     
     def count_tokens(self, text: str) -> int:
@@ -90,8 +96,46 @@ class StructureFirstChunker:
         
         # Sort by position
         boundaries.sort(key=lambda x: x[0])
-        
+
         return boundaries
+
+    def _split_by_token_fallback(
+        self, text: str, chunk_id: str, metadata: Dict, start_char_offset: int = 0
+    ) -> List[ContiguousChunk]:
+        """
+        Fallback: split text by token count when structure-based splitting leaves
+        a chunk over max_chunk_tokens. Produces chunks of at most max_chunk_tokens.
+        """
+        text = self._clean_text(text)
+        tokens = self.encoder.encode(text)
+        n_tokens = len(tokens)
+        # Callers only invoke this when text exceeds max_chunk_tokens, so we always split.
+
+        overlap = min(self.chunk_overlap, self.max_chunk_tokens // 4)
+        out: List[ContiguousChunk] = []
+        start = 0
+        part_idx = 1
+        while start < n_tokens:
+            end = min(start + self.max_chunk_tokens, n_tokens)
+            chunk_tokens = tokens[start:end]
+            chunk_text = self.encoder.decode(chunk_tokens)
+            part_id = f"{chunk_id}_part_{part_idx}"
+            out.append(
+                ContiguousChunk(
+                    id=part_id,
+                    text=chunk_text,
+                    metadata=metadata.copy(),
+                    chunk_index=part_idx,
+                    start_char=start_char_offset,
+                    end_char=start_char_offset + len(chunk_text),
+                )
+            )
+            part_idx += 1
+            start = end - overlap if end < n_tokens else n_tokens
+        if len(out) == 1:
+            out[0].id = chunk_id
+            out[0].chunk_index = None
+        return out
 
     def _split_at_subsections(self, text: str, chunk_id: str, metadata: Dict) -> List[ContiguousChunk]:
         """
@@ -107,7 +151,7 @@ class StructureFirstChunker:
         """
         boundaries = self._find_subsection_boundaries(text)
         if not boundaries:
-            return []
+            return []  # Caller will use token fallback
         first_pos, _ = boundaries[0]
         intro_text = text[:first_pos].strip()
         subsections: List[Tuple[int, int, str]] = []
@@ -143,16 +187,25 @@ class StructureFirstChunker:
         for idx, (i, j) in enumerate(ranges, 1):
             start_pos = subsections[i][0]
             end_pos = subsections[j - 1][1]
-            out.append(
-                ContiguousChunk(
-                    id=f"{chunk_id}_part_{idx}",
-                    text=build_text(i, j),
-                    metadata=metadata.copy(),
-                    chunk_index=idx,
-                    start_char=start_pos,
-                    end_char=end_pos,
+            range_text = build_text(i, j)
+            range_tokens = self.count_tokens(range_text)
+            part_id = f"{chunk_id}_part_{idx}"
+            if range_tokens <= self.max_chunk_tokens:
+                out.append(
+                    ContiguousChunk(
+                        id=part_id,
+                        text=range_text,
+                        metadata=metadata.copy(),
+                        chunk_index=idx,
+                        start_char=start_pos,
+                        end_char=end_pos,
+                    )
                 )
-            )
+            else:
+                # Single subsection (or range) still too large: fallback split by tokens
+                out.extend(
+                    self._split_by_token_fallback(range_text, part_id, metadata, start_pos)
+                )
         return out
     
     def _split_large_chunk(self, text: str, chunk_id: str, metadata: Dict, depth: int = 0) -> List[ContiguousChunk]:
@@ -442,31 +495,35 @@ class StructureFirstChunker:
 
 
 def chunk_for_rag_contiguous(
-    chunks: List[Dict], 
+    chunks: List[Dict],
     chunk_size: int = 500,
-    chunk_overlap: int = 50
+    chunk_overlap: int = 50,
+    max_chunk_tokens: int = MAX_CHUNK_TOKENS,
 ) -> List[Dict]:
     """
     Prepare chunks for RAG ingestion using structure-first chunking with token counting.
-    
+    No chunk will exceed max_chunk_tokens (default 2000).
+
     Args:
         chunks: List of chunk dictionaries
         chunk_size: Target chunk size in tokens (default: 500, sweet spot 300-700)
         chunk_overlap: Overlap between chunks in tokens (default: 50, range 0-80)
-        
+        max_chunk_tokens: Hard cap per chunk (default MAX_CHUNK_TOKENS = 2000).
+
     Returns:
         List of dictionaries ready for RAG indexing
     """
     # Calculate min/max from target
     min_tokens = max(300, int(chunk_size * 0.6))
     max_tokens = min(700, int(chunk_size * 1.4))
-    
+
     chunker = StructureFirstChunker(
         target_tokens=chunk_size,
         min_tokens=min_tokens,
         max_tokens=max_tokens,
         split_threshold=max_tokens,  # Split if >max_tokens
-        chunk_overlap=chunk_overlap
+        chunk_overlap=chunk_overlap,
+        max_chunk_tokens=max_chunk_tokens,
     )
     
     text_chunks = chunker.chunk_with_relationships(chunks)

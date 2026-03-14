@@ -9,14 +9,13 @@ from typing import List, Dict, Optional, Tuple
 import tiktoken
 import chromadb
 
-
 from llama_index.core import (
     VectorStoreIndex,
     # StorageContext,
     Settings,
     # load_index_from_storage,
 )
-from llama_index.core.schema import TextNode
+from llama_index.core.schema import TextNode, MetadataMode
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 # from llama_index.core.vector_stores import SimpleVectorStore
@@ -24,15 +23,13 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 
-
-
 class TaxCodeRAG:
     """RAG system for querying the US Tax Code."""
-    
-    # Embedding model context limit (nomic-embed-text / Ollama).
-    MAX_EMBEDDING_TOKENS = 2000
+
+    # Embedding model context limit (must match chunk cap so no chunk exceeds this).
+    MAX_EMBEDDING_TOKENS = 1850
     # Safety margin: truncate to this many tokens so tokenizer differences don't exceed limit
-    EMBEDDING_TRUNCATE_TOKENS = 1950
+    EMBEDDING_TRUNCATE_TOKENS = 1800
     
     def __init__(
         self,
@@ -55,7 +52,7 @@ class TaxCodeRAG:
         """
         data_dir = Path(__file__).parent / "data"
         self.chunks_path = Path(chunks_path) if chunks_path else data_dir / "rag_chunks2.json"
-        self.index_dir = Path(index_dir) if index_dir else data_dir / "index_rag_chunks2"
+        self.index_dir = Path(index_dir) if index_dir else data_dir / "index_chroma"
         # Resolve to absolute path so Chroma always uses the same DB regardless of process cwd
         if not self.index_dir.is_absolute():
             self.index_dir = (Path(__file__).parent / self.index_dir).resolve()
@@ -63,13 +60,9 @@ class TaxCodeRAG:
             self.index_dir = self.index_dir.resolve()
         self.ollama_model = ollama_model
         self.ollama_base_url = ollama_base_url
-        
-        # Initialize tiktoken encoder for token counting
-        try:
-            self.token_encoder = tiktoken.encoding_for_model("gpt-4")
-        except KeyError:
-            # Fallback to cl100k_base (used by GPT-4 and similar models)
-            self.token_encoder = tiktoken.get_encoding("cl100k_base")
+        # Token counter for truncation (embedding/context limits). cl100k_base is fast and
+        # sufficient for approximate limits; no need to match a specific LLM.
+        self.token_encoder = tiktoken.get_encoding("cl100k_base")
     
         # Initialize embedding model (using nomic-embed-text)
         print(f"Using Ollama for embeddings: {embedding_model}")
@@ -83,16 +76,15 @@ class TaxCodeRAG:
         Settings.llm = Ollama(model=ollama_model, base_url=ollama_base_url, request_timeout=120.0)
         
 
-        # Chroma stores the index in index_dir so that --index-name controls save location.
-        # In that dir, chroma.sqlite3 holds metadata; embeddings live in segment subdirs (not in SQLite).
-        # Use resolved absolute path so build and app always share the same DB for a given index name.
+        # Chroma stores the index in index_dir. PersistentClient opens existing DB if present.
+        # Load vs build is decided in _load_or_build_index (load if collection has vectors, else build).
         chroma_path = self.index_dir
         chroma_path.mkdir(parents=True, exist_ok=True)
         chroma_path_str = str(chroma_path)
         print(f"Chroma DB path (absolute): {chroma_path_str}")
         self.chroma_client = chromadb.PersistentClient(path=chroma_path_str)
 
-        # Load or build index (auto_build=True for backward compatibility)
+        # Load existing index or build new one (see _load_or_build_index)
         # Set auto_build=False if you want to require pre-built indexes
         self.index = self._load_or_build_index(auto_build=True)
         
@@ -195,7 +187,7 @@ class TaxCodeRAG:
             'id': chunk_id,
             'tag': metadata.get('tag'),
             'identifier': metadata.get('identifier'),
-            'heading': (metadata.get('heading') or '')[:500],  # cap heading length
+            'heading': (metadata.get('heading') or '')[:100],  # cap heading length
         }
         
         # Build prefix from identifier(s) and heading
@@ -252,6 +244,8 @@ class TaxCodeRAG:
             text=text,
             metadata=node_metadata,
             id_=chunk_id,
+            excluded_embed_metadata_keys=["identifiers", "children_ids"],
+            excluded_llm_metadata_keys=["identifiers", "children_ids"],
         )
     
     def _build_index(self) -> VectorStoreIndex:
@@ -285,12 +279,29 @@ class TaxCodeRAG:
                     if truncated:
                         msg += f" (was {original_tokens} before truncation)"
                     print(msg)
+                    print(node.metadata)
                 nodes.append(node)
             except Exception as e:
                 print(f"ERROR processing chunk {chunk.get('id', 'unknown')}: {e}")
                 continue
         
         print(f"Converted {len(nodes)} chunks to nodes")
+        
+        # Pre-check: find nodes that exceed embed context limit (same string LlamaIndex sends to embed model)
+        embed_limit = getattr(self, "_embedding_context_limit", self.MAX_EMBEDDING_TOKENS)
+        over_limit = []
+        for node in nodes:
+            embed_content = node.get_content(metadata_mode=MetadataMode.EMBED)
+            n_tokens = len(self.token_encoder.encode(embed_content))
+            if n_tokens > embed_limit:
+                over_limit.append((node.node_id, n_tokens, len(embed_content)))
+        if over_limit:
+            print(f"\n*** {len(over_limit)} node(s) exceed embed context limit ({embed_limit} tokens):")
+            for nid, tokens, chars in sorted(over_limit, key=lambda x: -x[1])[:20]:
+                print(f"    node_id={nid}  tokens={tokens}  chars={chars}")
+            if len(over_limit) > 20:
+                print(f"    ... and {len(over_limit) - 20} more")
+            print("*** Fix truncation in _chunk_to_node or increase limit, then rebuild.\n")
         
         # Chroma: create collection and empty vector store, then index inserts nodes (with embeddings)
         chroma_collection = self.chroma_client.get_or_create_collection("tax_code_rag")
