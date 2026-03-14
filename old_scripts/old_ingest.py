@@ -13,7 +13,7 @@ import json
 import argparse
 from dataclasses import dataclass, asdict, replace
 from pathlib import Path
-from chunk import chunk_for_rag
+from old_scripts.old_chunk import chunk_for_rag
 
 
 @dataclass

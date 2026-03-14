@@ -8,20 +8,8 @@ import argparse
 import re
 from dataclasses import asdict
 from pathlib import Path
-from chunk2 import chunk_for_rag_contiguous
-
-# Import the XMLParser class from the original ingest.py
-import sys
-import importlib.util
-
-# Load the XMLParser from ingest.py
-spec = importlib.util.spec_from_file_location("ingest", "ingest.py")
-ingest_module = importlib.util.module_from_spec(spec)
-sys.modules["ingest"] = ingest_module
-spec.loader.exec_module(ingest_module)
-
-XMLParser = ingest_module.XMLParser
-
+from chunk import chunk_for_rag_contiguous
+from old_scripts.old_ingest import XMLParser
 
 def clean_chunk_text(chunk_dict: dict) -> dict:
     """
