@@ -11,14 +11,11 @@ import chromadb
 
 from llama_index.core import (
     VectorStoreIndex,
-    # StorageContext,
     Settings,
-    # load_index_from_storage,
 )
 from llama_index.core.schema import TextNode, MetadataMode
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
-# from llama_index.core.vector_stores import SimpleVectorStore
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
@@ -27,9 +24,9 @@ class TaxCodeRAG:
     """RAG system for querying the US Tax Code."""
 
     # Embedding model context limit (must match chunk cap so no chunk exceeds this).
-    MAX_EMBEDDING_TOKENS = 1850
+    MAX_EMBEDDING_TOKENS = 2000
     # Safety margin: truncate to this many tokens so tokenizer differences don't exceed limit
-    EMBEDDING_TRUNCATE_TOKENS = 1800
+    EMBEDDING_TRUNCATE_TOKENS = 2000
     
     def __init__(
         self,
@@ -38,10 +35,11 @@ class TaxCodeRAG:
         embedding_model: str = "nomic-custom", # "nomic-embed-text", "embeddinggemma"
         ollama_model: str = "llama3.1:8b",  # Use the model tag you pulled (e.g., llama3.1:8b)
         ollama_base_url: str = "http://localhost:11434",
+        auto_build: bool = True,
     ):
         """
         Initialize the RAG system.
-        
+
         Args:
             chunks_path: Path to chunks json file
             index_dir: Directory to save/load index (default: ./data/index)
@@ -49,6 +47,8 @@ class TaxCodeRAG:
             ollama_model: Ollama model name for LLM (default: llama3.1:8b)
                             Use the exact model name you pulled, including tags like :8b
             ollama_base_url: Ollama server URL
+            auto_build: If True (default), auto-build or load the index on init.
+                        Set False when the caller (e.g. build command) will trigger the build itself.
         """
         data_dir = Path(__file__).parent / "data"
         self.chunks_path = Path(chunks_path) if chunks_path else data_dir / "rag_chunks2.json"
@@ -84,22 +84,24 @@ class TaxCodeRAG:
         print(f"Chroma DB path (absolute): {chroma_path_str}")
         self.chroma_client = chromadb.PersistentClient(path=chroma_path_str)
 
-        # Load existing index or build new one (see _load_or_build_index)
-        # Set auto_build=False if you want to require pre-built indexes
-        self.index = self._load_or_build_index(auto_build=True)
-        
-        # Create custom retriever with better configuration
+        self.index = None
+        self.retriever = None
+        self.query_engine = None
+
+        if auto_build:
+            self._init_index()
+
+    def _init_index(self):
+        """Load or build the index and wire up the retriever/query engine."""
+        self.index = self._load_or_build_index()
         self.retriever = VectorIndexRetriever(
             index=self.index,
-            similarity_top_k=10,  # Retrieve more candidates initially
+            similarity_top_k=10,
         )
-        
-        # Create query engine directly from retriever (avoids conflict with as_query_engine)
-        # Use "default" response mode (faster, single LLM call) instead of "compact" (multiple calls)
         self.query_engine = RetrieverQueryEngine.from_args(
             retriever=self.retriever,
         )
-    
+
     def _load_chunks(self) -> List[Dict]:
         """Load chunks from JSON file."""
         print(f"Loading chunks from {self.chunks_path}")
@@ -237,14 +239,14 @@ class TaxCodeRAG:
             # Text fits without truncation
             text = full_text_with_prefix
 
-        # Exclude large metadata from what gets embedded: VectorStoreIndex embeds
-        # node.get_content(metadata_mode=MetadataMode.EMBED) = metadata_str + "\n\n" + text.
-        # Without this, original_text (full unchunked text) would be in metadata_str and blow the context limit.
+        # Exclude ALL metadata from embedding: LlamaIndex sends metadata_str + "\n\n" + text to
+        # the embed model. Excluding metadata means only node.text (already token-capped) is sent,
+        # giving exact control over the embedding input size.
         return TextNode(
             text=text,
             metadata=node_metadata,
             id_=chunk_id,
-            excluded_embed_metadata_keys=["identifiers", "children_ids"],
+            excluded_embed_metadata_keys=list(node_metadata.keys()),
             excluded_llm_metadata_keys=["identifiers", "children_ids"],
         )
     
@@ -270,7 +272,13 @@ class TaxCodeRAG:
                     meta = dict(node.metadata) if node.metadata else {}
                     meta['hard_truncated'] = True
                     meta['original_token_count'] = input_tokens
-                    node = TextNode(text=truncated_text, metadata=meta, id_=node.node_id)
+                    node = TextNode(
+                        text=truncated_text,
+                        metadata=meta,
+                        id_=node.node_id,
+                        excluded_embed_metadata_keys=list(node.excluded_embed_metadata_keys or []),
+                        excluded_llm_metadata_keys=list(node.excluded_llm_metadata_keys or []),
+                    )
                     input_tokens = truncate_to
                     truncated = True
                 # Debug: print first chunk and any truncated chunk (input_length vs context_limit)
@@ -319,60 +327,22 @@ class TaxCodeRAG:
         print(f"Index saved to Chroma ({self.index_dir})")
         return index
     
-    def _load_or_build_index(self, auto_build: bool = True) -> VectorStoreIndex:
-        """
-        Load existing index or build new one.
-        
-        Args:
-            auto_build: If True, automatically build if index doesn't exist.
-                       If False, raise error if index doesn't exist.
-        """
+    def _load_or_build_index(self) -> VectorStoreIndex:
+        """Load existing Chroma index, or build from scratch if the collection is empty."""
         chroma_collection = self.chroma_client.get_or_create_collection("tax_code_rag")
         if chroma_collection.count() == 0:
             print("No existing Chroma index. Building new index...")
             return self._build_index()
-        else:
-            print(f"Loading existing Chroma index ({chroma_collection.count()} vectors)")
-            vector_store = ChromaVectorStore(
-                chroma_collection=chroma_collection,
-                client=self.chroma_client,
-            )
-            index = VectorStoreIndex.from_vector_store(
-                vector_store,
-                embed_model=Settings.embed_model,
-            )
-            return index
-    
-    def rebuild_index(self, force: bool = False):
-        """
-        Rebuild the index from scratch.
-        
-        Args:
-            force: If True, delete existing index without prompting
-        """
-        print("Rebuilding index...")
-        if not force:
-            response = input("Delete existing index and rebuild? (y/N): ").strip().lower()
-            if response != 'y':
-                print("Aborted.")
-                return
-        try:
-            self.chroma_client.delete_collection("tax_code_rag")
-            print("Deleted existing Chroma collection.")
-        except Exception as e:
-            print(f"No existing collection or error: {e}")
+        print(f"Loading existing Chroma index ({chroma_collection.count()} vectors)")
+        vector_store = ChromaVectorStore(
+            chroma_collection=chroma_collection,
+            client=self.chroma_client,
+        )
+        return VectorStoreIndex.from_vector_store(
+            vector_store,
+            embed_model=Settings.embed_model,
+        )
 
-        # Build new index
-        self.index = self._build_index()
-        self.retriever = VectorIndexRetriever(
-            index=self.index,
-            similarity_top_k=20,
-        )
-        self.query_engine = RetrieverQueryEngine.from_args(
-            retriever=self.retriever,
-        )
-        print("Index rebuilt successfully")
-    
     @staticmethod
     def get_index_dir_from_chunks(chunks_file: str, index_name: str = None) -> Path:
         """
@@ -463,22 +433,31 @@ def build_index_cmd(
         print(f"Then run: ollama pull {embedding_model}")
         return
     
-    # Initialize RAG system
+    # Initialize RAG (auto_build=False so we control when the build happens below)
     print("\nInitializing RAG system...")
     rag = TaxCodeRAG(
         chunks_path=str(chunks_path),
         index_dir=str(index_dir),
         embedding_model=embedding_model,
-        ollama_base_url=ollama_base_url
+        ollama_base_url=ollama_base_url,
+        auto_build=False,
     )
-    
-    # Check if we need to rebuild
-    if force_rebuild or not index_dir.exists() or not any(index_dir.iterdir()):
-        print("\nBuilding index (this may take a while)...")
-        rag.rebuild_index(force=force_rebuild)
+
+    # Decide whether to build
+    existing_count = rag.chroma_client.get_or_create_collection("tax_code_rag").count()
+    if force_rebuild or existing_count == 0:
+        if force_rebuild and existing_count > 0:
+            print(f"\nForce-rebuilding (existing index has {existing_count} vectors)...")
+        else:
+            print("\nNo existing index found. Building...")
+        try:
+            rag.chroma_client.delete_collection("tax_code_rag")
+        except Exception:
+            pass
+        rag._init_index()
     else:
-        print("\n✓ Index already exists and loaded successfully")
-        print("Use --force to rebuild")
+        print(f"\n✓ Index already exists ({existing_count} vectors). Use --force to rebuild.")
+        rag._init_index()
     
     print("\n" + "="*80)
     print("Index Build Complete!")
