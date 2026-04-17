@@ -1,22 +1,6 @@
-# Core dependencies
 lxml>=4.9.0
 requests>=2.31.0
-
-# LlamaIndex for RAG framework
-llama-index>=0.10.0
-# Embeddings - use sentence-transformers directly
-sentence-transformers>=2.2.0
-
-# Ollama for local LLM inference
-ollama>=0.1.0
-
-# Flask for web interface
+ollama>=0.2.0
 flask>=3.0.0
-
-# Token counting for chunking
 tiktoken>=0.5.0
-
-# Local vector store: fast connect, no full index load (good for hotspot/demos)
 chromadb>=0.4.0
-llama-index-vector-stores-chroma>=0.2.0
-

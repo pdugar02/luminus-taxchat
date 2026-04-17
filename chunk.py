@@ -268,8 +268,6 @@ class StructureFirstChunker:
         if not s:
             return None
         normalized = s.zfill(2)  # at least two chars: "4" -> "04"
-        if len(normalized) < 2:
-            return None
         return normalized[-2]
 
     def _merge_small_chunks(
