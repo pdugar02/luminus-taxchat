@@ -121,7 +121,7 @@ class TaxCodeRAG:
         print(f"Loaded existing Chroma index ({collection.count()} vectors)")
         return collection
 
-    def retrieve(self, question: str, top_k: int = 10) -> List[Dict]:
+    def retrieve(self, question: str, top_k: int = 5) -> List[Dict]:
         """Return the top_k chunks most semantically similar to the question."""
         result = self._ollama.embed(model=self.embedding_model, input=[question])
         results = self.collection.query(
@@ -143,6 +143,7 @@ class TaxCodeRAG:
                 },
             })
         return sources
+
 
     def generate(self, prompt: str) -> str:
         """Call the configured LLM with a prompt and return the response text."""

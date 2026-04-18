@@ -70,7 +70,7 @@ def handle_query(data: dict) -> tuple[dict, int]:
     start = time.time()
 
     expanded = rag_system.generate(EXPANSION_PROMPT.format(question=question))
-    sources = rag_system.retrieve(expanded, top_k=10)
+    sources = rag_system.retrieve(expanded, top_k=5)
 
     context = "\n\n".join(
         f"[§{s['metadata'].get('identifier', '?')}] {s['text']}"
