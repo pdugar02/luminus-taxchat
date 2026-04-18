@@ -12,7 +12,7 @@ import re
 import tiktoken
 
 # Hard token cap for any single chunk (must not exceed embedding/context limits).
-MAX_CHUNK_TOKENS = 2000
+MAX_CHUNK_TOKENS = 1800
 
 
 @dataclass

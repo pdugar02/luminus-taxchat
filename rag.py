@@ -24,9 +24,9 @@ class TaxCodeRAG:
     """RAG system for querying the US Tax Code."""
 
     # Embedding model context limit (must match chunk cap so no chunk exceeds this).
-    MAX_EMBEDDING_TOKENS = 2000
+    MAX_EMBEDDING_TOKENS = 1800
     # Safety margin: truncate to this many tokens so tokenizer differences don't exceed limit
-    EMBEDDING_TRUNCATE_TOKENS = 2000
+    EMBEDDING_TRUNCATE_TOKENS = 1800
     
     def __init__(
         self,
@@ -330,6 +330,8 @@ class TaxCodeRAG:
     def _load_or_build_index(self) -> VectorStoreIndex:
         """Load existing Chroma index, or build from scratch if the collection is empty."""
         chroma_collection = self.chroma_client.get_or_create_collection("tax_code_rag")
+        print(chroma_collection)
+        print(self.chroma_client)
         if chroma_collection.count() == 0:
             print("No existing Chroma index. Building new index...")
             return self._build_index()
