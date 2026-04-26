@@ -27,6 +27,7 @@ class TaxCodeRAG:
         ollama_base_url: str = "http://localhost:11434",
         auto_build: bool = True,
     ):
+        # set up the variables that store the path to the chunks and index
         data_dir = Path(__file__).parent / "data"
         self.chunks_path = Path(chunks_path) if chunks_path else data_dir / "rag_chunks2.json"
         self.index_dir = Path(index_dir) if index_dir else data_dir / "index_chroma"
@@ -35,11 +36,13 @@ class TaxCodeRAG:
         else:
             self.index_dir = self.index_dir.resolve()
 
+        # initialize embedding model, LLM, encoding model, and ollama client
         self.embedding_model = embedding_model
         self.ollama_model = ollama_model
         self.token_encoder = tiktoken.get_encoding("cl100k_base")
         self._ollama = _ollama.Client(host=ollama_base_url)
 
+        # create new directory for the chroma db storage, set up persistent client
         self.index_dir.mkdir(parents=True, exist_ok=True)
         print(f"Chroma DB path: {self.index_dir}")
         self.chroma_client = chromadb.PersistentClient(path=str(self.index_dir))
@@ -53,6 +56,7 @@ class TaxCodeRAG:
         self.collection = self._load_or_build_index()
 
     def _load_chunks(self) -> List[Dict]:
+        """Load chunks from the saved chunks_path"""
         print(f"Loading chunks from {self.chunks_path}")
         with open(self.chunks_path, "r", encoding="utf-8") as f:
             chunks = json.load(f)
@@ -64,7 +68,8 @@ class TaxCodeRAG:
         text = chunk.get("text", "")
         metadata = chunk.get("metadata", {})
 
-        ids = metadata.get("identifiers") or (
+        # get section/chapter numbers, create a prefix to the text including section # and heading
+        ids = metadata.get("identifiers") or ( 
             [metadata["identifier"]] if metadata.get("identifier") is not None else []
         )
         prefix_parts = []
@@ -74,11 +79,13 @@ class TaxCodeRAG:
             prefix_parts.append(metadata["heading"])
         prefix = f"{' '.join(prefix_parts)}: " if prefix_parts else ""
 
+        # create the full text chunk and embed it with the token encoder
         full = prefix + text
         tokens = self.token_encoder.encode(full)
         if len(tokens) <= self.MAX_EMBEDDING_TOKENS:
             return full
 
+        # truncate the full text if it's too long
         truncated = self.token_encoder.decode(tokens[: self.MAX_EMBEDDING_TOKENS])
         for delim in [".", "\n"]:
             pos = truncated.rfind(delim)
@@ -87,10 +94,12 @@ class TaxCodeRAG:
         return truncated
 
     def _build_index(self) -> chromadb.Collection:
+        """Takes the chunks, adds metadata, embeds them, and stores in the chromadb collection"""
         print("Building index from chunks...")
         chunks = self._load_chunks()
         collection = self.chroma_client.get_or_create_collection(COLLECTION_NAME)
 
+        # take chunks in batches of 50, create the chunk w/ metadata
         BATCH = 50
         total = len(chunks)
         for start in range(0, total, BATCH):
@@ -106,6 +115,7 @@ class TaxCodeRAG:
                 for c in batch
             ]
 
+            # embed the chunk and add it ot chroma db
             result = self._ollama.embed(model=self.embedding_model, input=texts)
             collection.add(ids=ids, embeddings=result.embeddings, documents=texts, metadatas=metadatas)
             print(f"  Indexed {min(start + BATCH, total)}/{total} chunks", end="\r")
@@ -123,9 +133,10 @@ class TaxCodeRAG:
 
     def retrieve(self, question: str, top_k: int = 5) -> List[Dict]:
         """Return the top_k chunks most semantically similar to the question."""
-        result = self._ollama.embed(model=self.embedding_model, input=[question])
+        # embed the query and look for top-k results
+        embedded_query = self._ollama.embed(model=self.embedding_model, input=[question])
         results = self.collection.query(
-            query_embeddings=[result.embeddings[0]],
+            query_embeddings=[embedded_query.embeddings[0]],
             n_results=top_k,
             include=["documents", "metadatas", "distances"],
         )

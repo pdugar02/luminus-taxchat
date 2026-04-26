@@ -62,22 +62,27 @@ def get_rag(index_name: str = None, chunks_file: str = None) -> TaxCodeRAG:
 
 def handle_query(data: dict) -> tuple[dict, int]:
     """Handle query requests and return (payload, status_code)."""
+    # check for question from the json payload
     question = data.get("question", "").strip()
     if not question:
         return {"error": "Question is required", "sources": []}, 400
 
+    # initialize TaxCodeRAG object
     rag_system = get_rag()
     start = time.time()
 
+    # call the open-source llm to expand the user's question
     expanded = rag_system.generate(EXPANSION_PROMPT.format(question=question))
+    # retrieve 5 sources
     sources = rag_system.retrieve(expanded, top_k=5)
 
+    # generate a final answer based on the retrieved sources and metadata
     context = "\n\n".join(
         f"[§{s['metadata'].get('identifier', '?')}] {s['text']}"
         for s in sources
     )
     answer = rag_system.generate(ANSWER_PROMPT.format(context=context, question=question))
-
+    
     print(f"Query took {time.time() - start:.1f}s")
     return {
         "answer": answer,
