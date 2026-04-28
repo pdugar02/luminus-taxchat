@@ -131,7 +131,7 @@ class TaxCodeRAG:
         print(f"Loaded existing Chroma index ({collection.count()} vectors)")
         return collection
 
-    def retrieve(self, question: str, top_k: int = 5) -> List[Dict]:
+    def retrieve(self, question: str, top_k: int = 10) -> List[Dict]:
         """Return the top_k chunks most semantically similar to the question."""
         # embed the query and look for top-k results
         embedded_query = self._ollama.embed(model=self.embedding_model, input=[question])

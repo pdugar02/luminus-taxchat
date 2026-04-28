@@ -3,6 +3,8 @@ RAG query logic for the Tax Code web app.
 Provides get_rag and request handlers used by app.py.
 """
 
+import json
+import re
 import time
 from pathlib import Path
 
@@ -10,33 +12,54 @@ from rag import TaxCodeRAG
 
 rag = None
 
-EXPANSION_PROMPT = """
-You are helping to improve a search query for finding information in the US Tax Code (Title 26).
+EXPANSION_PROMPT = """You are an expert in US tax law (Title 26, Internal Revenue Code). Break down this tax question into targeted search queries that together will surface ALL relevant code sections, including definitions, amendments, and exceptions.
 
-Original question: {question}
+Question: {question}
 
-Generate an improved search query that:
-1. Includes key tax code terminology (e.g., "taxable income", "filing status", "tax brackets", "standard deduction")
-2. Expands abbreviations (e.g., "MFS" -> "married filing separately")
-3. Adds related terms (e.g., "tax rate" for "how much am I taxed")
-4. Keeps the core intent of the question
-5. If a specific section is asked for in the original query, make sure to include that section number
-6. If there is something ambiguous, rephrase it with your best interpretation given the context.
-7. Focus on terms that will actually appear in the relevant tax code sections.
+Think through:
+- What is the core tax issue? (e.g., deductibility of an expense, recognition of gain or loss, eligibility for a credit, characterization of income, treatment of an entity or transaction, procedural requirement)
+- Which IRC sections are most likely to govern this? Consider both the primary rule and cross-referenced sections. Examples of broad areas: §§1-59 (income taxes), §§61-91 (gross income), §§101-140 (exclusions), §§161-199A (deductions), §§241-291 (corporate/disallowance rules), §§301-385 (corporate distributions), §§401-436 (retirement plans), §§501-530 (exempt orgs), §§701-761 (partnerships), §§901-908 (foreign tax credits), §§1001-1092 (gains and losses), §§1221-1298 (capital gains), §§1361-1379 (S corporations), §§6001-7000 (procedure and administration).
+- Have there been legislative amendments (TCJA 2017, CARES Act 2020, Inflation Reduction Act 2022, or other acts) that created a modified version of the primary rule applicable to the year or facts in the question?
+- What definitions or eligibility thresholds does the answer turn on? (e.g., "qualified business income", "at-risk amount", "passive activity", "adjusted basis", "arm's length", "controlled foreign corporation", "substantial authority")
+- Are there special rules, anti-abuse provisions, elections, safe harbors, or exceptions specific to the taxpayer's entity type, transaction type, or circumstances?
 
-Return ONLY the improved search query, nothing else:
+Generate exactly 3 distinct search queries:
+1. The primary rule, test, or computation directly governing the issue — use the legal terms that would appear in that section
+2. Any amended, updated, or superseding provision for the same issue — phrase it to find the version applicable to the specific year or circumstance
+3. Key definitions, thresholds, eligibility requirements, or exceptions relevant to the specific facts
+
+Return ONLY a JSON array of exactly 3 strings, no explanation:
+["query 1", "query 2", "query 3"]
 """
 
-ANSWER_PROMPT = """You are an expert tax law assistant helping IRS employees find answers in the US Tax Code (Title 26).
+ANSWER_PROMPT = """You are an expert tax law assistant helping IRS employees apply the US Tax Code (Title 26).
 
-Answer the following question using ONLY the tax code sections provided below. Quote section numbers when relevant. If the answer cannot be determined from the provided sections, say so clearly.
+Critical rules:
+- When sections conflict or one amends another, ALWAYS prefer the provision with the later effective date. For example, a section that applies "for taxable years beginning after December 31, 2017" supersedes the original table for tax year 2018 and later.
+- Show step-by-step calculations where applicable.
+- Cite specific section numbers (e.g., §1(j), §63(c)(2)) for every rule you apply.
+- If a retrieved section was superseded or only applies to specific years, state this explicitly and use the correct current provision instead.
+- If you cannot find a complete answer from the provided sections, explain exactly what information is missing.
 
 Tax Code Sections:
 {context}
 
 Question: {question}
 
-Answer:"""
+Answer (step by step where calculations are involved):"""
+
+
+def _parse_queries(raw: str, fallback: str) -> list[str]:
+    """Parse LLM output into a list of query strings, falling back to raw text."""
+    match = re.search(r'\[.*?\]', raw, re.DOTALL)
+    if match:
+        try:
+            queries = json.loads(match.group())
+            if isinstance(queries, list) and all(isinstance(q, str) for q in queries):
+                return [q for q in queries[:5] if q.strip()]
+        except json.JSONDecodeError:
+            pass
+    return [raw.strip() or fallback]
 
 
 def get_rag(index_name: str = None, chunks_file: str = None) -> TaxCodeRAG:
@@ -62,27 +85,35 @@ def get_rag(index_name: str = None, chunks_file: str = None) -> TaxCodeRAG:
 
 def handle_query(data: dict) -> tuple[dict, int]:
     """Handle query requests and return (payload, status_code)."""
-    # check for question from the json payload
     question = data.get("question", "").strip()
     if not question:
         return {"error": "Question is required", "sources": []}, 400
 
-    # initialize TaxCodeRAG object
     rag_system = get_rag()
     start = time.time()
 
-    # call the open-source llm to expand the user's question
-    expanded = rag_system.generate(EXPANSION_PROMPT.format(question=question))
-    # retrieve 5 sources
-    sources = rag_system.retrieve(expanded, top_k=5)
+    # generate multiple targeted queries covering different aspects of the question
+    raw_expansion = rag_system.generate(EXPANSION_PROMPT.format(question=question))
+    queries = _parse_queries(raw_expansion, question)
+    print(f"Expanded into {len(queries)} queries: {queries}")
 
-    # generate a final answer based on the retrieved sources and metadata
+    # retrieve for each query, deduplicate by chunk ID keeping the highest score
+    seen: dict[str, dict] = {}
+    for q in queries:
+        for source in rag_system.retrieve(q, top_k=5):
+            sid = source["id"]
+            if sid not in seen or source["score"] > seen[sid]["score"]:
+                seen[sid] = source
+
+    # sort by score descending, cap at 15 chunks for context window
+    sources = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:15]
+
     context = "\n\n".join(
         f"[§{s['metadata'].get('identifier', '?')}] {s['text']}"
         for s in sources
     )
     answer = rag_system.generate(ANSWER_PROMPT.format(context=context, question=question))
-    
+
     print(f"Query took {time.time() - start:.1f}s")
     return {
         "answer": answer,
