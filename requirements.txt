@@ -4,3 +4,4 @@ ollama>=0.2.0
 flask>=3.0.0
 tiktoken>=0.5.0
 chromadb>=0.5.0,<1.0.0
+rank-bm25>=0.2.2

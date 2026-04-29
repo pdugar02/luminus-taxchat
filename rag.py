@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 import tiktoken
 import chromadb
 import ollama as _ollama
+from rank_bm25 import BM25Okapi
 
 COLLECTION_NAME = "tax_code_rag"
 
@@ -47,6 +48,8 @@ class TaxCodeRAG:
         print(f"Chroma DB path: {self.index_dir}")
         self.chroma_client = chromadb.PersistentClient(path=str(self.index_dir))
         self.collection = None
+        self.bm25 = None
+        self._bm25_chunks: List[Dict] = []
 
         if auto_build:
             self._init_index()
@@ -54,6 +57,20 @@ class TaxCodeRAG:
     def _init_index(self):
         """Load or build the collection and make it ready for queries."""
         self.collection = self._load_or_build_index()
+        self._build_bm25_index()
+
+    def _build_bm25_index(self):
+        """Build an in-memory BM25 index from the texts already stored in ChromaDB."""
+        all_data = self.collection.get(include=["documents", "metadatas"])
+        ids = all_data["ids"]
+        docs = all_data["documents"]
+        metadatas = all_data["metadatas"]
+        self._bm25_chunks = [
+            {"id": ids[i], "text": docs[i], "metadata": metadatas[i]}
+            for i in range(len(ids))
+        ]
+        self.bm25 = BM25Okapi([doc.lower().split() for doc in docs])
+        print(f"BM25 index built ({len(docs)} documents)")
 
     def _load_chunks(self) -> List[Dict]:
         """Load chunks from the saved chunks_path"""
@@ -132,27 +149,72 @@ class TaxCodeRAG:
         return collection
 
     def retrieve(self, question: str, top_k: int = 10) -> List[Dict]:
-        """Return the top_k chunks most semantically similar to the question."""
-        # embed the query and look for top-k results
+        """Return top_k chunks using hybrid semantic + BM25 retrieval merged via RRF."""
+        candidate_k = top_k * 3  # fetch more candidates from each source before merging
+
+        # --- semantic search via ChromaDB ---
         embedded_query = self._ollama.embed(model=self.embedding_model, input=[question])
         results = self.collection.query(
             query_embeddings=[embedded_query.embeddings[0]],
-            n_results=top_k,
+            n_results=candidate_k,
             include=["documents", "metadatas", "distances"],
         )
-        sources = []
+        semantic_hits: Dict[str, dict] = {}
         for i, doc in enumerate(results["documents"][0]):
-            metadata = results["metadatas"][0][i]
-            sources.append({
-                "id": results["ids"][0][i],
+            meta = results["metadatas"][0][i]
+            chunk_id = results["ids"][0][i]
+            semantic_hits[chunk_id] = {
+                "id": chunk_id,
                 "text": doc,
-                "score": round(1 - results["distances"][0][i], 4),
+                "score": 0.0,
                 "metadata": {
-                    "identifier": metadata.get("identifier"),
-                    "heading": metadata.get("heading"),
-                    "tag": metadata.get("tag"),
+                    "identifier": meta.get("identifier"),
+                    "heading": meta.get("heading"),
+                    "tag": meta.get("tag"),
                 },
-            })
+            }
+
+        # --- BM25 keyword search ---
+        bm25_hits: Dict[str, dict] = {}
+        if self.bm25 is not None:
+            token_scores = self.bm25.get_scores(question.lower().split())
+            # get indices of top candidate_k scores
+            top_indices = sorted(range(len(token_scores)), key=lambda i: token_scores[i], reverse=True)[:candidate_k]
+            for idx in top_indices:
+                chunk = self._bm25_chunks[idx]
+                chunk_id = chunk["id"]
+                meta = chunk.get("metadata", {})
+                bm25_hits[chunk_id] = {
+                    "id": chunk_id,
+                    "text": self._prepare_chunk_text(chunk),
+                    "score": 0.0,
+                    "metadata": {
+                        "identifier": str(meta.get("identifier") or ""),
+                        "heading": meta.get("heading") or "",
+                        "tag": meta.get("tag") or "",
+                    },
+                }
+
+        # --- Reciprocal Rank Fusion ---
+        # score = 1/(60 + rank) from each list; sum scores across lists
+        RRF_K = 60
+        rrf_scores: Dict[str, float] = {}
+
+        for rank, chunk_id in enumerate(semantic_hits):
+            rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + 1.0 / (RRF_K + rank + 1)
+
+        for rank, chunk_id in enumerate(bm25_hits):
+            rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + 1.0 / (RRF_K + rank + 1)
+
+        # merge all candidates and sort by RRF score
+        all_hits = {**bm25_hits, **semantic_hits}  # semantic overwrites text/meta if duplicate
+        ranked = sorted(all_hits.keys(), key=lambda cid: rrf_scores.get(cid, 0.0), reverse=True)
+
+        sources = []
+        for chunk_id in ranked[:top_k]:
+            hit = all_hits[chunk_id]
+            hit["score"] = round(rrf_scores[chunk_id], 6)
+            sources.append(hit)
         return sources
 
 
