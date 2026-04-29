@@ -12,23 +12,23 @@ from rag import TaxCodeRAG
 
 rag = None
 
-EXPANSION_PROMPT = """You are an expert in US tax law (Title 26, Internal Revenue Code). Break down this tax question into targeted search queries that together will surface ALL relevant code sections, including definitions, amendments, and exceptions.
+EXPANSION_PROMPT = """You are an expert in US tax law (Title 26, Internal Revenue Code). Break down this tax question into 3 targeted search queries that together will surface ALL relevant code sections, including the current version of any amended provisions.
 
 Question: {question}
 
 Think through:
-- What is the core tax issue? (e.g., deductibility of an expense, recognition of gain or loss, eligibility for a credit, characterization of income, treatment of an entity or transaction, procedural requirement)
-- Which IRC sections are most likely to govern this? Consider both the primary rule and cross-referenced sections. Examples of broad areas: §§1-59 (income taxes), §§61-91 (gross income), §§101-140 (exclusions), §§161-199A (deductions), §§241-291 (corporate/disallowance rules), §§301-385 (corporate distributions), §§401-436 (retirement plans), §§501-530 (exempt orgs), §§701-761 (partnerships), §§901-908 (foreign tax credits), §§1001-1092 (gains and losses), §§1221-1298 (capital gains), §§1361-1379 (S corporations), §§6001-7000 (procedure and administration).
-- Have there been legislative amendments (TCJA 2017, CARES Act 2020, Inflation Reduction Act 2022, or other acts) that created a modified version of the primary rule applicable to the year or facts in the question?
-- What definitions or eligibility thresholds does the answer turn on? (e.g., "qualified business income", "at-risk amount", "passive activity", "adjusted basis", "arm's length", "controlled foreign corporation", "substantial authority")
-- Are there special rules, anti-abuse provisions, elections, safe harbors, or exceptions specific to the taxpayer's entity type, transaction type, or circumstances?
+- What is the core tax issue? (e.g., deductibility, income recognition, gain/loss, credit eligibility, entity treatment, procedural requirement)
+- Which IRC sections directly govern this? Consider the primary rule AND sections that amend, limit, or supersede it. Broad areas for reference: §§1-59 (income taxes), §§61-140 (gross income/exclusions), §§161-291 (deductions/disallowances), §§301-385 (corporate), §§401-436 (retirement), §§501-530 (exempt orgs), §§701-761 (partnerships), §§901-908 (foreign tax credits), §§1001-1298 (gains/losses/capital gains), §§1361-1379 (S corps), §§6001-7000 (procedure).
+- Has this area been amended by TCJA 2017, CARES 2020, IRA 2022, or another act? If so, phrase query 2 to match the TEXT of that amended provision — what words would appear in that specific subsection?
+- What definitions, thresholds, or eligibility tests does the answer turn on? What exceptions or special rules apply to the specific entity type or transaction?
 
-Generate exactly 3 distinct search queries:
-1. The primary rule, test, or computation directly governing the issue — use the legal terms that would appear in that section
-2. Any amended, updated, or superseding provision for the same issue — phrase it to find the version applicable to the specific year or circumstance
-3. Key definitions, thresholds, eligibility requirements, or exceptions relevant to the specific facts
+Write each query as a short natural language phrase using the legal terminology that would appear in the relevant IRC section itself. Do NOT use boolean operators (AND, OR), quotation marks around terms, or search engine syntax.
 
-Return ONLY a JSON array of exactly 3 strings, no explanation:
+Query 1: The primary statutory rule or computation governing the issue
+Query 2: The amended or superseding provision — phrased as the actual content of that section (e.g., "tax rate tables for taxable years beginning after December 31 2017 married filing separately"), not as a general search for amendments
+Query 3: Key definitions, thresholds, exceptions, or cross-referenced rules the answer depends on
+
+Return ONLY a valid JSON array of exactly 3 plain strings. No markdown, no code fences, no explanation — just the array:
 ["query 1", "query 2", "query 3"]
 """
 
@@ -51,7 +51,10 @@ Answer (step by step where calculations are involved):"""
 
 def _parse_queries(raw: str, fallback: str) -> list[str]:
     """Parse LLM output into a list of query strings, falling back to raw text."""
-    match = re.search(r'\[.*?\]', raw, re.DOTALL)
+    # strip markdown code fences the LLM sometimes wraps output in
+    cleaned = re.sub(r'```(?:json)?\s*|\s*```', '', raw).strip()
+    # greedy match to capture the full array (non-greedy would stop at the first ])
+    match = re.search(r'\[.*\]', cleaned, re.DOTALL)
     if match:
         try:
             queries = json.loads(match.group())
@@ -59,7 +62,11 @@ def _parse_queries(raw: str, fallback: str) -> list[str]:
                 return [q for q in queries[:5] if q.strip()]
         except json.JSONDecodeError:
             pass
-    return [raw.strip() or fallback]
+    # fallback: extract any double-quoted strings long enough to be a real query
+    quoted = re.findall(r'"([^"]{15,})"', cleaned)
+    if quoted:
+        return [q for q in quoted[:5] if q.strip()]
+    return [cleaned or fallback]
 
 
 def get_rag(index_name: str = None, chunks_file: str = None) -> TaxCodeRAG:
