@@ -4,117 +4,125 @@ Provides get_rag and request handlers used by app.py.
 """
 
 import json
-from typing import List
+import re
+import time
+from pathlib import Path
 
 from rag import TaxCodeRAG
-from llama_index.llms.ollama import Ollama
-import time
 
 rag = None
-REFRAME_PROMPT = """You are a precise legal research assistant.
-Rephrase the user query into 3 alternative search queries that preserve the original meaning,
-use legal/tax terminology where helpful, and avoid adding new facts.
 
-Return ONLY a JSON array of exactly 3 strings. No extra text.
+EXPANSION_PROMPT = """You are an expert in US tax law (Title 26, Internal Revenue Code). Break down this tax question into 3 targeted search queries that together will surface ALL relevant code sections, including the current version of any amended provisions.
 
-User query:
-{question}
+Question: {question}
+
+Think through:
+- What is the core tax issue? (e.g., deductibility, income recognition, gain/loss, credit eligibility, entity treatment, procedural requirement)
+- Which IRC sections directly govern this? Consider the primary rule AND sections that amend, limit, or supersede it. Broad areas for reference: §§1-59 (income taxes), §§61-140 (gross income/exclusions), §§161-291 (deductions/disallowances), §§301-385 (corporate), §§401-436 (retirement), §§501-530 (exempt orgs), §§701-761 (partnerships), §§901-908 (foreign tax credits), §§1001-1298 (gains/losses/capital gains), §§1361-1379 (S corps), §§6001-7000 (procedure).
+- Has this area been amended by TCJA 2017, CARES 2020, IRA 2022, or another act? If so, phrase query 2 to match the TEXT of that amended provision — what words would appear in that specific subsection?
+- What definitions, thresholds, or eligibility tests does the answer turn on? What exceptions or special rules apply to the specific entity type or transaction?
+
+Write each query as a short natural language phrase using the legal terminology that would appear in the relevant IRC section itself. Do NOT use boolean operators (AND, OR), quotation marks around terms, or search engine syntax.
+
+Query 1: The primary statutory rule or computation governing the issue
+Query 2: The amended or superseding provision — phrased as the actual content of that section (e.g., "tax rate tables for taxable years beginning after December 31 2017 married filing separately"), not as a general search for amendments
+Query 3: Key definitions, thresholds, exceptions, or cross-referenced rules the answer depends on
+
+Return ONLY a valid JSON array of exactly 3 plain strings. No markdown, no code fences, no explanation — just the array:
+["query 1", "query 2", "query 3"]
 """
 
-EXPANSION_PROMPT = """
-You are helping to improve a search query for finding information in the US Tax Code (Title 26).
+ANSWER_PROMPT = """You are an expert tax law assistant helping IRS employees apply the US Tax Code (Title 26).
 
-Original question: {question}
+Critical rules:
+- When sections conflict or one amends another, ALWAYS prefer the provision with the later effective date. For example, a section that applies "for taxable years beginning after December 31, 2017" supersedes the original table for tax year 2018 and later.
+- Show step-by-step calculations where applicable.
+- Cite specific section numbers (e.g., §1(j), §63(c)(2)) for every rule you apply.
+- If a retrieved section was superseded or only applies to specific years, state this explicitly and use the correct current provision instead.
+- If you cannot find a complete answer from the provided sections, explain exactly what information is missing.
 
-Generate an improved search query that:
-1. Includes key tax code terminology (e.g., "taxable income", "filing status", "tax brackets", "standard deduction")
-2. Expands abbreviations (e.g., "MFS" -> "married filing separately")
-3. Adds related terms (e.g., "tax rate" for "how much am I taxed")
-4. Keeps the core intent of the question
-5. If a specific section is asked for in the original query, make sure to include that section number
-6. Evaluate key phrases and terms in the search query. If there is something ambiguous, rephrase it with your best interpretation of what the user is trying to ask given the context.
-7. Focus on the terms that actually matter to the user's question. If the user is asking about a specific section, focus on that section. If the user is asking about a specific term, focus on that term. Do not focus on arbitrary terms or numbers that are not going to be present in the most relevant chunks to the query.
+Tax Code Sections:
+{context}
 
-Return ONLY the improved search query, nothing else:
-"""
+Question: {question}
+
+Answer (step by step where calculations are involved):"""
 
 
-def get_rag(index_name: str = None, chunks_file: str = None):
-    """
-    Lazy initialization of RAG system.
+def _parse_queries(raw: str, fallback: str) -> list[str]:
+    """Parse LLM output into a list of query strings, falling back to raw text."""
+    # strip markdown code fences the LLM sometimes wraps output in
+    cleaned = re.sub(r'```(?:json)?\s*|\s*```', '', raw).strip()
+    # greedy match to capture the full array (non-greedy would stop at the first ])
+    match = re.search(r'\[.*\]', cleaned, re.DOTALL)
+    if match:
+        try:
+            queries = json.loads(match.group())
+            if isinstance(queries, list) and all(isinstance(q, str) for q in queries):
+                return [q for q in queries[:5] if q.strip()]
+        except json.JSONDecodeError:
+            pass
+    # fallback: extract any double-quoted strings long enough to be a real query
+    quoted = re.findall(r'"([^"]{15,})"', cleaned)
+    if quoted:
+        return [q for q in quoted[:5] if q.strip()]
+    return [cleaned or fallback]
 
-    Args:
-        index_name: Name of the index to use (e.g., 'rag_chunks2' for index_rag_chunks2)
-                    If None, uses default from chunks_file or rag_chunks2.json
-        chunks_file: Path to chunks file (only used if index doesn't exist and needs building)
-    """
+
+def get_rag(index_name: str = None, chunks_file: str = None) -> TaxCodeRAG:
+    """Lazy initialization of the RAG system."""
     global rag
     if rag is None:
-        from pathlib import Path
+        data_dir = Path(__file__).parent / "data"
 
-        # Determine index directory
         if index_name:
-            index_dir = Path(__file__).parent / "data" / f"index_{index_name}"
+            index_dir = data_dir / f"index_{index_name}"
         elif chunks_file:
-            # Derive from chunks filename
-            chunks_path = Path(chunks_file)
-            index_dir = Path(__file__).parent / "data" / f"index_{chunks_path.stem}"
+            index_dir = data_dir / f"index_{Path(chunks_file).stem}"
         else:
-            # Default: use rag_chunks2, with legacy fallback to data/index
-            data_dir = Path(__file__).parent / "data"
-            default_index_dir = data_dir / "index_rag_chunks2"
-            legacy_index_dir = data_dir / "index"
-            if default_index_dir.exists() or not legacy_index_dir.exists():
-                index_dir = default_index_dir
-            else:
-                index_dir = legacy_index_dir
+            index_dir = data_dir / "index_rag_chunks2"
             chunks_file = str(data_dir / "rag_chunks2.json")
 
         rag = TaxCodeRAG(
             chunks_path=chunks_file,
-            index_dir=str(index_dir)
+            index_dir=str(index_dir),
         )
     return rag
 
-def reframe_query(question: str, model: str = "llama3.1:8b", base_url: str = "http://localhost:11434") -> List[str]:
-    """Generate three re-phrased queries using Llama 3.1."""
-    llm = Ollama(model=model, base_url=base_url, request_timeout=20.0)
-    prompt = REFRAME_PROMPT.format(question=question)
-    response = llm.complete(prompt)
-    raw = response.text.strip()
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            return [str(item).strip() for item in parsed][:3]
-    except json.JSONDecodeError:
-        pass
-    # Fallback: split lines and take first three non-empty lines
-    lines = [line.strip("- ").strip() for line in raw.splitlines() if line.strip()]
-    return lines[:3]
-
-def expand_query(question: str) -> str:
-        """
-        Expand/rewrite the query to improve retrieval.
-        Uses LLM to generate a better search query with related terms.
-        """
-        llm = Ollama(model="llama3.1:8b", base_url="http://localhost:11434", request_timeout=20.0)
-        expanded = llm.complete(EXPANSION_PROMPT.format(question=question)).text.strip()
-        return expanded
-    
 
 def handle_query(data: dict) -> tuple[dict, int]:
     """Handle query requests and return (payload, status_code)."""
-    question = data.get('question', '').strip()
+    question = data.get("question", "").strip()
     if not question:
-        return {'error': 'Question is required', 'sources': []}, 400
+        return {"error": "Question is required", "sources": []}, 400
 
     rag_system = get_rag()
-    query_engine = rag_system.index.as_query_engine(
-        include_text=True, response_mode="refine", retriever_mode='hybrid', similarity_top_k=10
-    )
     start = time.time()
-    question = expand_query(question)
-    result = query_engine.query(question)
-    end = time.time()
-    print(f"Time taken to query: {end - start} seconds")
-    return {'answer': result.response, 'sources': [rag_system.format_source(node, preview_length=200) for node in result.source_nodes]}, 200
+
+    # generate multiple targeted queries covering different aspects of the question
+    raw_expansion = rag_system.generate(EXPANSION_PROMPT.format(question=question))
+    queries = _parse_queries(raw_expansion, question)
+    print(f"Expanded into {len(queries)} queries: {queries}")
+
+    # retrieve for each query, deduplicate by chunk ID keeping the highest score
+    seen: dict[str, dict] = {}
+    for q in queries:
+        for source in rag_system.retrieve(q, top_k=5):
+            sid = source["id"]
+            if sid not in seen or source["score"] > seen[sid]["score"]:
+                seen[sid] = source
+
+    # sort by score descending, cap at 15 chunks for context window
+    sources = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:15]
+
+    context = "\n\n".join(
+        f"[§{s['metadata'].get('identifier', '?')}] {s['text']}"
+        for s in sources
+    )
+    answer = rag_system.generate(ANSWER_PROMPT.format(context=context, question=question))
+
+    print(f"Query took {time.time() - start:.1f}s")
+    return {
+        "answer": answer,
+        "sources": [rag_system.format_source(s) for s in sources],
+    }, 200
