@@ -32,6 +32,18 @@ Return ONLY a valid JSON array of exactly 3 plain strings. No markdown, no code 
 ["query 1", "query 2", "query 3"]
 """
 
+RERANK_PROMPT = """You are a US tax law expert. Given a tax question and a list of retrieved code sections, reorder them from most to least directly applicable to the specific facts — especially the year, filing status, entity type, and transaction type in the question.
+
+Question: {question}
+
+Retrieved sections (ID: first line of text):
+{summaries}
+
+Return a JSON array of ALL IDs in order from most to least relevant. Include every ID exactly once.
+Return ONLY the JSON array, no explanation:
+["id1", "id2", ...]
+"""
+
 ANSWER_PROMPT = """You are an expert tax law assistant helping IRS employees apply the US Tax Code (Title 26).
 
 Critical rules:
@@ -67,6 +79,32 @@ def _parse_queries(raw: str, fallback: str) -> list[str]:
     if quoted:
         return [q for q in quoted[:5] if q.strip()]
     return [cleaned or fallback]
+
+
+def _rerank_sources(rag_system: TaxCodeRAG, question: str, sources: list[dict]) -> list[dict]:
+    """Ask the LLM to reorder sources by applicability to the question."""
+    summaries = "\n".join(
+        f"{s['id']}: {s['text'][:150].replace(chr(10), ' ')}"
+        for s in sources
+    )
+    raw = rag_system.generate(RERANK_PROMPT.format(question=question, summaries=summaries))
+    cleaned = re.sub(r'```(?:json)?\s*|\s*```', '', raw).strip()
+    match = re.search(r'\[.*\]', cleaned, re.DOTALL)
+    if match:
+        try:
+            reranked_ids = json.loads(match.group())
+            if isinstance(reranked_ids, list):
+                id_to_source = {s['id']: s for s in sources}
+                reranked = [id_to_source[rid] for rid in reranked_ids if rid in id_to_source]
+                # append any sources the reranker dropped (safety net)
+                mentioned = {rid for rid in reranked_ids if rid in id_to_source}
+                reranked += [s for s in sources if s['id'] not in mentioned]
+                print(f"Reranked: {[s['id'] for s in reranked[:5]]}")
+                return reranked
+        except (json.JSONDecodeError, KeyError):
+            pass
+    print("Reranking failed, using original order")
+    return sources
 
 
 def get_rag(index_name: str = None, chunks_file: str = None) -> TaxCodeRAG:
@@ -114,6 +152,9 @@ def handle_query(data: dict) -> tuple[dict, int]:
 
     # sort by score descending, cap at 15 chunks for context window
     sources = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:15]
+
+    # rerank by applicability to the specific question before passing to the answer LLM
+    sources = _rerank_sources(rag_system, question, sources)
 
     context = "\n\n".join(
         f"[§{s['metadata'].get('identifier', '?')}] {s['text']}"
