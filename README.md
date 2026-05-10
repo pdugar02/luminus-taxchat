@@ -60,9 +60,9 @@ The project includes a RAG (Retrieval-Augmented Generation) system for querying 
   ```
 2. **Install and start Ollama:**
   - Download from [https://ollama.ai](https://ollama.ai)
-  - Pull the Llama 3.1 model:
+  - Pull the Gemma4 model:
     ```bash
-    ollama pull llama3.1
+    ollama pull gemma4:e4b
     ```
   - Make sure Ollama is running (it should start automatically)
 3. **Build the index:**
