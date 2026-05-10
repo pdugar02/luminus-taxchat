@@ -140,7 +140,9 @@ def handle_query(data: dict) -> tuple[dict, int]:
     # generate multiple targeted queries covering different aspects of the question
     raw_expansion = rag_system.generate(EXPANSION_PROMPT.format(question=question))
     queries = _parse_queries(raw_expansion, question)
-    print(f"Expanded into {len(queries)} queries: {queries}")
+    print(f"Expanded into {len(queries)} queries:")
+    for q in queries:
+        print(q)
 
     # retrieve for each query, deduplicate by chunk ID keeping the highest score
     seen: dict[str, dict] = {}
@@ -160,6 +162,7 @@ def handle_query(data: dict) -> tuple[dict, int]:
         f"[§{s['metadata'].get('identifier', '?')}] {s['text']}"
         for s in sources
     )
+    print(context)
     answer = rag_system.generate(ANSWER_PROMPT.format(context=context, question=question))
 
     print(f"Query took {time.time() - start:.1f}s")
