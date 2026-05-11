@@ -78,12 +78,12 @@ Return ONLY the JSON array, no explanation:
 # ── Strategy routing table ────────────────────────────────────────────────────
 
 _STRATEGY = {
-    Q_APPLICATION:  {"prompt": EXPANSION_PROMPT_APPLICATION,  "top_k": 5, "cap": 12, "answer": ANSWER_PROMPT_APPLICATION},
-    Q_SURVEY:       {"prompt": EXPANSION_PROMPT_SURVEY,       "top_k": 7, "cap": 20, "answer": ANSWER_PROMPT_SURVEY},
-    Q_EXCEPTION:    {"prompt": EXPANSION_PROMPT_EXCEPTION,    "top_k": 6, "cap": 18, "answer": ANSWER_PROMPT_EXCEPTION},
-    Q_DEFINITIONAL: {"prompt": EXPANSION_PROMPT_DEFINITIONAL, "top_k": 4, "cap": 10, "answer": ANSWER_PROMPT_DEFINITIONAL},
-    Q_PROCEDURAL:   {"prompt": EXPANSION_PROMPT_PROCEDURAL,   "top_k": 4, "cap": 10, "answer": ANSWER_PROMPT_PROCEDURAL},
-    Q_COMPARISON:   {"prompt": EXPANSION_PROMPT_COMPARISON,   "top_k": 5, "cap": 16, "answer": ANSWER_PROMPT_COMPARISON},
+    Q_APPLICATION:  {"prompt": EXPANSION_PROMPT_APPLICATION,  "top_k": 5, "cap": 6,  "answer": ANSWER_PROMPT_APPLICATION},
+    Q_SURVEY:       {"prompt": EXPANSION_PROMPT_SURVEY,       "top_k": 7, "cap": 8,  "answer": ANSWER_PROMPT_SURVEY},
+    Q_EXCEPTION:    {"prompt": EXPANSION_PROMPT_EXCEPTION,    "top_k": 6, "cap": 8,  "answer": ANSWER_PROMPT_EXCEPTION},
+    Q_DEFINITIONAL: {"prompt": EXPANSION_PROMPT_DEFINITIONAL, "top_k": 4, "cap": 5,  "answer": ANSWER_PROMPT_DEFINITIONAL},
+    Q_PROCEDURAL:   {"prompt": EXPANSION_PROMPT_PROCEDURAL,   "top_k": 4, "cap": 5,  "answer": ANSWER_PROMPT_PROCEDURAL},
+    Q_COMPARISON:   {"prompt": EXPANSION_PROMPT_COMPARISON,   "top_k": 5, "cap": 8,  "answer": ANSWER_PROMPT_COMPARISON},
 }
 
 
