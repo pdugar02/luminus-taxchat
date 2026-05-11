@@ -191,13 +191,15 @@ def handle_query(data: dict) -> tuple[dict, int]:
     print(f"Question type: {q_type}")
 
     # expand the question into targeted IRC search queries
+    t0 = time.time()
     raw_expansion = rag_system.generate(strategy["prompt"].format(question=question))
     queries = _parse_queries(raw_expansion, question)
-    print(f"Expanded into {len(queries)} queries:")
+    print(f"Expansion: {time.time() - t0:.1f}s — {len(queries)} queries:")
     for q in queries:
         print(f"  {q}")
 
     # retrieve for each query; deduplicate by chunk ID keeping the highest RRF score
+    t0 = time.time()
     seen: dict[str, dict] = {}
     for q in queries:
         for source in rag_system.retrieve(q, top_k=strategy["top_k"]):
@@ -207,7 +209,12 @@ def handle_query(data: dict) -> tuple[dict, int]:
 
     # sort by score, cap by type, then rerank by applicability
     sources = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:strategy["cap"]]
+    print(f"Retrieval: {time.time() - t0:.1f}s — {len(sources)} chunks")
+
+    # rerank by applicability
+    t0 = time.time()
     sources = _rerank_sources(rag_system, question, sources)
+    print(f"Reranking: {time.time() - t0:.1f}s")
 
     formatted_sources = [rag_system.format_source(s) for s in sources]
 
@@ -225,7 +232,7 @@ def handle_query(data: dict) -> tuple[dict, int]:
     # print(context)
     answer = rag_system.generate(strategy["answer"].format(context=context, question=question))
 
-    print(f"Query took {time.time() - start:.1f}s")
+    print(f"Total:     {time.time() - start:.1f}s")
     return {
         "answer": answer,
         "sources": formatted_sources,
