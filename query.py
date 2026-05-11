@@ -60,19 +60,26 @@ Question: {question}
 Category:"""
 
 
-# ── Reranking ─────────────────────────────────────────────────────────────────
+# ── Verification ─────────────────────────────────────────────────────────────
 
-RERANK_PROMPT = """You are a US tax law expert. Given a tax question and a list of retrieved code sections, reorder them from most to least directly applicable to the specific facts — especially the year, filing status, entity type, and transaction type in the question.
+VERIFY_PROMPT = """You are a careful tax law editor. Review this answer against the source chunks and return a corrected final answer.
 
-Question: {question}
+Rules:
+- Output ONLY the final answer text — no notes, no source tags, no commentary about what you changed or whether the answer is correct or not.
+- Fix IRC section numbers that are absent from or contradict the source chunks.
+- Fix dollar amounts, percentages, or dates that contradict the source chunks.
+- Remove claims not supported by the source text.
+- Do not add new information beyond what is in the source chunks.
+- If the answer is already correct, return it exactly as-is.
 
-Retrieved sections (ID: first line of text):
-{summaries}
+Source chunks:
+{context}
 
-Return a JSON array of ALL IDs in order from most to least relevant. Include every ID exactly once.
-Return ONLY the JSON array, no explanation:
-["id1", "id2", ...]
-"""
+Answer to verify:
+{answer}
+
+Corrected answer:"""
+
 
 
 # ── Strategy routing table ────────────────────────────────────────────────────
@@ -126,30 +133,6 @@ def _classify_question(rag_system: TaxCodeRAG, question: str) -> str:
         return Q_EXCEPTION
     return Q_APPLICATION
 
-
-def _rerank_sources(rag_system: TaxCodeRAG, question: str, sources: list[dict]) -> list[dict]:
-    """Ask the LLM to reorder sources by applicability to the question."""
-    summaries = "\n".join(
-        f"{s['id']}: {s['text'][:150].replace(chr(10), ' ')}"
-        for s in sources
-    )
-    raw = rag_system.generate(RERANK_PROMPT.format(question=question, summaries=summaries))
-    cleaned = re.sub(r'```(?:json)?\s*|\s*```', '', raw).strip()
-    match = re.search(r'\[.*\]', cleaned, re.DOTALL)
-    if match:
-        try:
-            reranked_ids = json.loads(match.group())
-            if isinstance(reranked_ids, list):
-                id_to_source = {s['id']: s for s in sources}
-                reranked = [id_to_source[rid] for rid in reranked_ids if rid in id_to_source]
-                mentioned = {rid for rid in reranked_ids if rid in id_to_source}
-                reranked += [s for s in sources if s['id'] not in mentioned]
-                print(f"Reranked: {[s['id'] for s in reranked[:5]]}")
-                return reranked
-        except (json.JSONDecodeError, KeyError):
-            pass
-    print("Reranking failed, using original order")
-    return sources
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -206,15 +189,8 @@ def handle_query(data: dict) -> tuple[dict, int]:
             sid = source["id"]
             if sid not in seen or source["score"] > seen[sid]["score"]:
                 seen[sid] = source
-
-    # sort by score, cap by type, then rerank by applicability
     sources = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:strategy["cap"]]
     print(f"Retrieval: {time.time() - t0:.1f}s — {len(sources)} chunks")
-
-    # rerank by applicability
-    t0 = time.time()
-    sources = _rerank_sources(rag_system, question, sources)
-    print(f"Reranking: {time.time() - t0:.1f}s")
 
     formatted_sources = [rag_system.format_source(s) for s in sources]
 
@@ -230,7 +206,13 @@ def handle_query(data: dict) -> tuple[dict, int]:
         for s in sources
     )
     # print(context)
+    t0 = time.time()
     answer = rag_system.generate(strategy["answer"].format(context=context, question=question))
+    print(f"Answer:    {time.time() - t0:.1f}s")
+
+    t0 = time.time()
+    answer = rag_system.generate(VERIFY_PROMPT.format(context=context, answer=answer))
+    print(f"Verify:    {time.time() - t0:.1f}s")
 
     print(f"Total:     {time.time() - start:.1f}s")
     return {

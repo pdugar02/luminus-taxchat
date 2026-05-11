@@ -16,7 +16,7 @@ import sys
 import anthropic
 import dotenv
 
-from query import RERANK_PROMPT, _STRATEGY, handle_query
+from query import _STRATEGY, handle_query
 
 dotenv.load_dotenv()
 
@@ -42,9 +42,6 @@ EVAL_USER_PROMPT = """Evaluate this RAG answer for a tax question.
 
 ### {expansion_name}
 {expansion_prompt}
-
-### RERANK_PROMPT
-{rerank_prompt}
 
 ### {answer_name}
 {answer_prompt}
@@ -74,7 +71,6 @@ Return ONLY valid JSON — no markdown fences, no explanation:
   "critique": "<2-3 sentence overall assessment>",
   "prompt_suggestions": {{
     "{expansion_name}": "<specific instruction additions/changes, or null>",
-    "RERANK_PROMPT": "<specific instruction additions/changes, or null>",
     "{answer_name}": "<specific instruction additions/changes, or null>"
   }}
 }}"""
@@ -117,7 +113,6 @@ def evaluate(question: str, answer: str, sources: list[dict], q_type: str) -> di
                     q_type=q_type,
                     expansion_name=expansion_name,
                     expansion_prompt=strategy["prompt"],
-                    rerank_prompt=RERANK_PROMPT,
                     answer_name=answer_name,
                     answer_prompt=strategy["answer"],
                 ),
