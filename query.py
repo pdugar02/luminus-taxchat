@@ -169,9 +169,10 @@ def handle_query(data: dict) -> tuple[dict, int]:
     start = time.time()
 
     # classify and select type-specific strategy
+    t0 = time.time()
     q_type = _classify_question(rag_system, question)
     strategy = _STRATEGY[q_type]
-    print(f"Question type: {q_type}")
+    print(f"Classify:  {time.time() - t0:.1f}s — {q_type}")
 
     # expand the question into targeted IRC search queries
     t0 = time.time()
