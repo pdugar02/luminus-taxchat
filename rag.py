@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 import tiktoken
 import chromadb
 import ollama as _ollama
+import anthropic as _anthropic
 from rank_bm25 import BM25Okapi
 
 COLLECTION_NAME = "tax_code_rag"
@@ -26,6 +27,7 @@ class TaxCodeRAG:
         embedding_model: str = "nomic-custom",
         ollama_model: str = "gemma4:e4b",
         ollama_base_url: str = "http://localhost:11434",
+        anthropic_model: Optional[str] = "claude-sonnet-4-6",
         auto_build: bool = True,
     ):
         # set up the variables that store the path to the chunks and index
@@ -42,6 +44,10 @@ class TaxCodeRAG:
         self.ollama_model = ollama_model
         self.token_encoder = tiktoken.get_encoding("cl100k_base")
         self._ollama = _ollama.Client(host=ollama_base_url)
+
+        # initialize Anthropic client if anthropic_model is specified
+        self.anthropic_model = anthropic_model
+        self._anthropic = _anthropic.Anthropic() if anthropic_model else None
 
         # create new directory for the chroma db storage, set up persistent client
         self.index_dir.mkdir(parents=True, exist_ok=True)
@@ -220,6 +226,13 @@ class TaxCodeRAG:
 
     def generate(self, prompt: str) -> str:
         """Call the configured LLM with a prompt and return the response text."""
+        if self._anthropic:
+            with self._anthropic.messages.stream(
+                model=self.anthropic_model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                return stream.get_final_message().content[0].text.strip()
         response = self._ollama.chat(
             model=self.ollama_model,
             messages=[{"role": "user", "content": prompt}],
