@@ -24,7 +24,7 @@ class TaxCodeRAG:
         chunks_path: Optional[str] = None,
         index_dir: Optional[str] = None,
         embedding_model: str = "nomic-custom",
-        ollama_model: str = "llama3.1:8b",
+        ollama_model: str = "gemma4:e4b",
         ollama_base_url: str = "http://localhost:11434",
         auto_build: bool = True,
     ):

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tax Code RAG Chat</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -334,6 +335,84 @@
             transform: translateX(20px);
         }
 
+        .message.assistant .message-content h1,
+        .message.assistant .message-content h2,
+        .message.assistant .message-content h3,
+        .message.assistant .message-content h4 {
+            margin: 12px 0 6px;
+            color: #333;
+        }
+
+        .message.assistant .message-content p {
+            margin: 6px 0;
+            line-height: 1.6;
+        }
+
+        .message.assistant .message-content ul,
+        .message.assistant .message-content ol {
+            margin: 6px 0 6px 20px;
+        }
+
+        .message.assistant .message-content li {
+            margin: 4px 0;
+            line-height: 1.5;
+        }
+
+        .message.assistant .message-content table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 10px 0;
+            font-size: 13px;
+        }
+
+        .message.assistant .message-content th,
+        .message.assistant .message-content td {
+            border: 1px solid #ddd;
+            padding: 8px 12px;
+            text-align: left;
+        }
+
+        .message.assistant .message-content th {
+            background: #f0f4ff;
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .message.assistant .message-content tr:nth-child(even) {
+            background: #fafafa;
+        }
+
+        .message.assistant .message-content code {
+            background: #f0f0f0;
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+
+        .message.assistant .message-content pre {
+            background: #f0f0f0;
+            padding: 10px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 8px 0;
+        }
+
+        .message.assistant .message-content pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .message.assistant .message-content hr {
+            border: none;
+            border-top: 1px solid #e0e0e0;
+            margin: 12px 0;
+        }
+
+        .message.assistant .message-content strong {
+            color: #222;
+        }
+
         .error {
             color: #e74c3c;
             background: #fee;
@@ -521,7 +600,7 @@
             
             const contentDiv = document.createElement('div');
             contentDiv.className = 'message-content';
-            contentDiv.textContent = answer;
+            contentDiv.innerHTML = marked.parse(answer);
             
             messageDiv.appendChild(contentDiv);
 

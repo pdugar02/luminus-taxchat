@@ -27,3 +27,5 @@ Thumbs.db
 # Cursor - track skills but ignore settings
 .cursor/rules/
 .cursor/settings.json
+
+.env
