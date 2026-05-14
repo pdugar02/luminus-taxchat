@@ -62,23 +62,14 @@ Category:"""
 
 # ── Verification ─────────────────────────────────────────────────────────────
 
-VERIFY_PROMPT = """You are a careful tax law editor. Review this answer against the source chunks and return a corrected final answer.
+VERIFY_PROMPT = """Question: {question}
+Answer: {answer}
+Sources: {context}
 
-Rules:
-- Output ONLY the final answer text — no notes, no source tags, no commentary about what you changed or whether the answer is correct or not.
-- Fix IRC section numbers that are absent from or contradict the source chunks.
-- Fix dollar amounts, percentages, or dates that contradict the source chunks.
-- Remove claims not supported by the source text.
-- Do not add new information beyond what is in the source chunks.
-- If the answer is already correct, return it exactly as-is.
-
-Source chunks:
-{context}
-
-Answer to verify:
-{answer}
-
-Corrected answer:"""
+Does the answer address the question and is it supported by the sources?
+If yes: output exactly: PASS
+If no: output one sentence describing the specific problem.
+Output nothing else."""
 
 
 
@@ -212,8 +203,16 @@ def handle_query(data: dict) -> tuple[dict, int]:
     print(f"Answer:    {time.time() - t0:.1f}s")
 
     t0 = time.time()
-    answer = rag_system.generate(VERIFY_PROMPT.format(context=context, answer=answer))
-    print(f"Verify:    {time.time() - t0:.1f}s")
+    verdict = rag_system.generate(VERIFY_PROMPT.format(question=question, answer=answer, context=context))
+    print(f"Verify:    {time.time() - t0:.1f}s — {verdict.strip()[:80]}")
+    if verdict.strip().upper() != "PASS":
+        feedback = verdict.strip()
+        t0 = time.time()
+        answer = rag_system.generate(strategy["answer"].format(
+            context=f"Note: a previous attempt had this issue: {feedback}. Fix it.\n\n{context}",
+            question=question,
+        ))
+        print(f"Retry:     {time.time() - t0:.1f}s")
 
     print(f"Total:     {time.time() - start:.1f}s")
     return {
