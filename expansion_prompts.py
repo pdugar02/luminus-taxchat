@@ -13,6 +13,7 @@ Think through:
 - Which IRC section directly governs this? Reference ranges: §§1-59 (rates/brackets), §§61-140 (gross income/exclusions), §§21-45 (credits), §§161-291 (deductions), §§401-436 (retirement), §§1001-1298 (gains/losses).
 - Has this area been amended by TCJA 2017, CARES 2020, SECURE 2019/2022, or IRA 2022? If so, phrase query 2 as words that actually appear in the amended text.
 - What specific thresholds, phase-outs, or eligibility tests does the answer turn on?
+- Does the question explicitly name an IRC section number? If so, Query 1 must include that literal section number/citation.
 
 Query 1: The primary statutory rule or rate table that directly governs this issue
 Query 2: The current (post-amendment) version of that provision — phrased as content that would appear in that specific amended section, not as a general search for amendments
@@ -43,7 +44,7 @@ EXPANSION_PROMPT_EXCEPTION = """You are an expert in US tax law (Title 26, Inter
 Question: {question}
 
 Generate 4 targeted search queries:
-Query 1: The primary rule itself — what the general provision allows or requires
+Query 1: The primary rule itself — what the general provision allows or requires. If the question explicitly names an IRC section number, Query 1 must include that literal section number/citation; otherwise identify the section that most directly governs the issue.
 Query 2: Dollar caps, percentage limits, income thresholds, or phase-outs that reduce or eliminate the benefit
 Query 3: Outright exceptions, exclusions, or disqualifying conditions — which entities, activities, or transactions are carved out or ineligible
 Query 4: Cross-referenced IRC sections cited within the primary section that impose additional restrictions (e.g., passive activity rules §469, at-risk rules §465, specified service trades, W-2 wage limits)
