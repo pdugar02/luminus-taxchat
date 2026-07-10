@@ -8,6 +8,8 @@ import re
 import time
 from pathlib import Path
 
+import tiktoken
+
 from rag import TaxCodeRAG
 from expansion_prompts import (
     EXPANSION_PROMPT_APPLICATION, EXPANSION_PROMPT_SURVEY, EXPANSION_PROMPT_EXCEPTION,
@@ -200,10 +202,22 @@ def get_rag(index_name: str = None, chunks_file: str = None) -> TaxCodeRAG:
     return rag
 
 
+# Keep the statute context within the model's window: chunks can be up to 1800
+# tokens each, and overflowing num_ctx makes Ollama silently truncate the prompt
+# (observed as empty answers). Sources are ranked, so the lowest-ranked chunks
+# are dropped first.
+_CONTEXT_TOKEN_BUDGET = 9000
+_GENERATION_OPTIONS = {"num_ctx": 16384}
+
+_token_encoder = tiktoken.get_encoding("cl100k_base")
+
+
 def _format_context(sources: list[dict]) -> str:
     """Render sources as the Tax Code Sections block, including where each section
-    lives in the code and its effective-date note when available."""
+    lives in the code and its effective-date note when available. Stops adding
+    chunks once the token budget is reached."""
     blocks = []
+    used_tokens = 0
     for s in sources:
         meta = s.get("metadata", {})
         header = f"[§{meta.get('identifier', '?')}]"
@@ -213,6 +227,10 @@ def _format_context(sources: list[dict]) -> str:
         note = (meta.get("effective_date_note") or "").strip()
         if note:
             block += f"\n(Effective date note: {note[:300]})"
+        block_tokens = len(_token_encoder.encode(block))
+        if blocks and used_tokens + block_tokens > _CONTEXT_TOKEN_BUDGET:
+            break
+        used_tokens += block_tokens
         blocks.append(block)
     return "\n\n".join(blocks)
 
@@ -286,20 +304,29 @@ def handle_query(data: dict) -> tuple[dict, int]:
 
     context = _format_context(sources)
     t0 = time.time()
-    answer = rag_system.generate(strategy["answer"].format(context=context, question=question))
+    answer = rag_system.generate(
+        strategy["answer"].format(context=context, question=question),
+        options=_GENERATION_OPTIONS,
+    )
     print(f"Answer:    {time.time() - t0:.1f}s")
 
     t0 = time.time()
-    verdict = rag_system.generate(VERIFY_PROMPT.format(question=question, answer=answer, context=context))
-    print(f"Verify:    {time.time() - t0:.1f}s — {verdict.strip()[:80]}")
-    if verdict.strip().upper() != "PASS":
-        feedback = verdict.strip()
+    verdict = rag_system.generate(
+        VERIFY_PROMPT.format(question=question, answer=answer, context=context),
+        options=_GENERATION_OPTIONS,
+    )
+    feedback = verdict.strip()
+    print(f"Verify:    {time.time() - t0:.1f}s — {feedback[:80]}")
+    # only retry on substantive feedback; an empty verdict is a verifier failure, not a rejection
+    if feedback and feedback.upper() != "PASS":
         t0 = time.time()
         # keep the feedback out of the statute context so it can't be cited as source text
-        answer = rag_system.generate(strategy["answer"].format(
+        retry = rag_system.generate(strategy["answer"].format(
             context=context,
             question=f"{question}\n\n(A previous draft of this answer was rejected because: {feedback} — make sure this answer fixes that.)",
-        ))
+        ), options=_GENERATION_OPTIONS)
+        if retry.strip():
+            answer = retry
         print(f"Retry:     {time.time() - t0:.1f}s")
 
     print(f"Total:     {time.time() - start:.1f}s")
