@@ -211,7 +211,27 @@ class XMLParser:
         
         return result
     
-    def _get_text_content(self, element: etree.Element, skip_notes: bool = True) -> str:
+    def _identifier_to_label(self, identifier: Optional[str]) -> Optional[str]:
+        """Convert a full USLM identifier path into a parenthesized citation label.
+        e.g. "/us/usc/t26/s25A/g/1/A/i" -> "(g)(1)(A)(i)"
+        Returns None if the identifier isn't rooted in a section or has no nested path.
+        """
+        if not identifier:
+            return None
+        parts = identifier.split('/')
+        section_idx = None
+        for i, part in enumerate(parts):
+            if part.startswith('s') and len(part) > 1 and part[1].isdigit():
+                section_idx = i
+                break
+        if section_idx is None:
+            return None
+        nested_parts = parts[section_idx + 1:]
+        if not nested_parts:
+            return None
+        return ''.join(f"({p})" for p in nested_parts)
+
+    def _get_text_content(self, element: etree.Element, skip_notes: bool = True, suppress_num: bool = False) -> str:
         """Extract text content from an element, skipping notes and structural children."""
         text_parts = []
         
@@ -254,23 +274,32 @@ class XMLParser:
                     # Add colon after heading to separate it from content
                     text_parts.append(child_text + ':')
             elif tag_name == 'num':
-                # Include numbers without colon
-                child_text = self._get_text_content(child, skip_notes=True)
-                if child_text:
-                    text_parts.append(child_text)
-            elif tag_name in ['p', 'chapeau', 'continuation', 'subparagraph', 'clause']:
-                # Include actual content paragraphs, chapeau, continuation text, subparagraphs, and clauses
-                # Subparagraphs and clauses are included in paragraph text, not chunked separately
+                # Include numbers without colon (suppressed when the parent container
+                # already prepended a full-path label, e.g. "(g)(5)" instead of "(5)")
+                if not suppress_num:
+                    child_text = self._get_text_content(child, skip_notes=True)
+                    if child_text:
+                        text_parts.append(child_text)
+            elif tag_name in ['p', 'chapeau', 'continuation']:
+                # Include actual content paragraphs, chapeau, and continuation text
                 # Continuation elements may contain tables, which will be processed recursively
                 child_text = self._get_text_content(child, skip_notes=True)
                 if child_text:
                     text_parts.append(child_text)
-            elif tag_name in ['subsection', 'paragraph']:
-                # Include subsections and paragraphs in section text (they're not chunked separately)
-                # Recursively get all text from subsection/paragraph including their children
-                child_text = self._get_text_content(child, skip_notes=True)
-                if child_text:
-                    text_parts.append(child_text)
+            elif tag_name in ['subsection', 'paragraph', 'subparagraph', 'clause']:
+                # Include subsections/paragraphs/subparagraphs/clauses in section text
+                # (they're not chunked separately). Replace the child's own bare "(5)"
+                # label with a full-path label like "(g)(5)" derived from its identifier
+                # attribute, so nested citations aren't ambiguous once flattened into
+                # a single chunk (e.g. multiple paragraphs under one "(g)" heading).
+                label = self._identifier_to_label(child.get('identifier'))
+                if label:
+                    child_text = self._get_text_content(child, skip_notes=True, suppress_num=True)
+                    text_parts.append(f"{label} {child_text}".strip() if child_text else label)
+                else:
+                    child_text = self._get_text_content(child, skip_notes=True)
+                    if child_text:
+                        text_parts.append(child_text)
             
             # Add tail text
             if child.tail:
