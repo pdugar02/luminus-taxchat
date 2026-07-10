@@ -296,6 +296,10 @@
             cursor: not-allowed;
         }
 
+        .input-wrapper button.stop {
+            background: linear-gradient(135deg, #e53e3e 0%, #c53030 100%);
+        }
+
         .toggle-container {
             display: flex;
             align-items: center;
@@ -484,6 +488,15 @@
         let retrieveOnly = false;
         let chunkCounter = 0; // Global counter for unique chunk IDs
         let chatHistory = []; // [{role: 'user'|'assistant', content: string}, ...]
+        let currentController = null; // AbortController for the in-flight query
+        let isQuerying = false; // true while a query is running (Send acts as Stop)
+
+        function stopQuery() {
+            if (currentController) {
+                currentController.abort();
+                currentController = null;
+            }
+        }
 
         function toggleRetrieve() {
             retrieveOnly = !retrieveOnly;
@@ -503,13 +516,23 @@
 
         async function sendMessage() {
             const input = document.getElementById('questionInput');
+            const sendButton = document.getElementById('sendButton');
+
+            // While a query is running the button acts as a Stop control
+            if (isQuerying) {
+                stopQuery();
+                return;
+            }
+
             const question = input.value.trim();
-            
             if (!question) return;
 
-            // Disable input
+            // Enter querying state: input disabled, button becomes "Stop"
+            isQuerying = true;
+            currentController = new AbortController();
             input.disabled = true;
-            document.getElementById('sendButton').disabled = true;
+            sendButton.textContent = 'Stop';
+            sendButton.classList.add('stop');
 
             // Add user message
             addMessage(question, 'user');
@@ -530,7 +553,8 @@
                         question: question,
                         retrieve_only: retrieveOnly,
                         history: chatHistory
-                    })
+                    }),
+                    signal: currentController.signal
                 });
 
                 const data = await response.json();
@@ -549,11 +573,18 @@
                 }
             } catch (error) {
                 removeMessage(loadingId);
-                addErrorMessage('Failed to connect to server: ' + error.message);
+                if (error.name === 'AbortError') {
+                    addNoticeMessage('Query stopped. Ready for a new question.');
+                } else {
+                    addErrorMessage('Failed to connect to server: ' + error.message);
+                }
             } finally {
-                // Re-enable input
+                // Leave querying state: restore input and the Send button
+                isQuerying = false;
+                currentController = null;
                 input.disabled = false;
-                document.getElementById('sendButton').disabled = false;
+                sendButton.textContent = 'Send';
+                sendButton.classList.remove('stop');
                 input.focus();
             }
         }
@@ -713,6 +744,21 @@
             errorDiv.textContent = '❌ Error: ' + error;
             
             messageDiv.appendChild(errorDiv);
+            container.appendChild(messageDiv);
+            scrollToBottom();
+        }
+
+        function addNoticeMessage(text) {
+            const container = document.getElementById('chatContainer');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message assistant';
+
+            const noticeDiv = document.createElement('div');
+            noticeDiv.style.opacity = '0.6';
+            noticeDiv.style.fontStyle = 'italic';
+            noticeDiv.textContent = '⏹ ' + text;
+
+            messageDiv.appendChild(noticeDiv);
             container.appendChild(messageDiv);
             scrollToBottom();
         }
