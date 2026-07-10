@@ -140,6 +140,56 @@ def _format_history(history: list[dict], max_messages: int = 6, max_chars: int =
     return "\n".join(lines)
 
 
+# ── Follow-up detection (deterministic condensation gate) ─────────────────────
+# Condensation is a full LLM call that reads the whole transcript, so it costs
+# 30–50s and grows every turn. We only pay it when the question actually depends
+# on prior turns — i.e. it carries an unresolved reference: a leading connective
+# / ellipsis ("what about…", "and if…"), an anaphoric pronoun/demonstrative
+# ("it", "that", "those"), or a bare subjectless fragment. A self-contained
+# question (even an unrelated topic change) has nothing for condensation to
+# resolve and is passed through unchanged. The gate deliberately errs toward
+# condensing when ambiguous: a needless rewrite only wastes time, whereas a
+# missed follow-up would retrieve on an unresolvable question.
+
+_FOLLOWUP_LEAD_RE = re.compile(
+    r"^\s*(what about|how about|what if|what else|anything else|"
+    r"and\b|but\b|also\b|then\b|or\b|so\b|"
+    r"for (those|these|them|it|that|this)\b)",
+    re.IGNORECASE,
+)
+
+# Anaphoric pronouns/demonstratives that point back to an earlier turn.
+_ANAPHORA_RE = re.compile(
+    r"\b(it|its|it's|that|this|these|those|them|they|their|theirs|such|"
+    r"the same|the former|the latter|the above|the previous|the prior)\b",
+    re.IGNORECASE,
+)
+
+# Leading words that mark a self-contained interrogative (so a short question
+# like "What is AMT?" isn't mistaken for an elliptical fragment).
+_QUESTION_WORD_RE = re.compile(
+    r"^\s*(what|how|when|where|why|which|who|whom|whose|can|could|do|does|did|"
+    r"is|are|was|were|should|would|will|may|must|am|if)\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_condensation(question: str) -> bool:
+    """Deterministically decide whether a question depends on conversation history.
+    Returns True only for likely follow-ups; self-contained questions skip the
+    expensive condensation LLM call. No LLM/embedding calls — pure string work."""
+    q = question.strip()
+    if _FOLLOWUP_LEAD_RE.search(q):
+        return True
+    if _ANAPHORA_RE.search(q):
+        return True
+    # very short and not phrased as a standalone question → likely an ellipsis
+    # ("contribution limits?", "for married couples?")
+    if len(q.split()) <= 4 and not _QUESTION_WORD_RE.search(q):
+        return True
+    return False
+
+
 def _condense_question(rag_system: TaxCodeRAG, question: str, history: list[dict]) -> str:
     """Rewrite a follow-up into a standalone question using conversation history."""
     raw = rag_system.generate(
@@ -251,11 +301,14 @@ def handle_query(data: dict) -> tuple[dict, int]:
     rag_system = get_rag()
     start = time.time()
 
-    # resolve follow-ups against conversation history
-    if history:
+    # resolve follow-ups against conversation history — but only when the question
+    # actually references prior turns; condensation is an expensive LLM call
+    if history and _needs_condensation(question):
         t0 = time.time()
         question = _condense_question(rag_system, question, history)
         print(f"Condense:  {time.time() - t0:.1f}s — {question}")
+    elif history:
+        print("Condense:  skipped (self-contained question)")
 
     # classify and select type-specific strategy
     t0 = time.time()
