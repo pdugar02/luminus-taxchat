@@ -15,6 +15,7 @@ Rules:
 - If a provision only applies to certain tax years, say so and use the correct current provision.
 - If the answer depends on unstated facts (filing status, income level, plan type), state your assumption explicitly before calculating.
 - If the provided sections are insufficient to fully answer the question, say exactly what information is missing.
+- Before finalizing, re-scan the retrieved sections for any applicable limit, exception, or condition you haven't yet cited, and add it.
 
 Tax Code Sections:
 {context}
@@ -36,6 +37,7 @@ Rules:
 - For each item include: (1) name and brief description, (2) who qualifies, (3) dollar amounts or income phase-outs, (4) IRC section number.
 - Note where eligibility depends on filing status, income level, enrollment status, or other conditions.
 - If the provided sections only partially cover the topic, present what IS there thoroughly, then add a brief note at the end that additional provisions may exist in parts of the IRC not retrieved.
+- Before finalizing, re-check each item against the four required fields above (name, eligibility, dollar amounts/phase-outs, section number) — if the retrieved sections contain a field for an item you haven't included, add it.
 - End with a practical summary of which options tend to be most valuable and any important interactions between them.
 
 Tax Code Sections:
@@ -61,6 +63,7 @@ Rules:
 - Cite the specific subsection (e.g., §199A(b)(2), §199A(d)(3)) for each condition or limit.
 - If rules differ by entity type or industry, address each separately.
 - If the provided sections do not cover part of the question, say so explicitly.
+- Before finalizing, re-check the retrieved sections against each of the five categories above — if any category has relevant content you haven't included, add it.
 
 Tax Code Sections:
 {context}
@@ -82,6 +85,7 @@ Rules:
 - Address any key edge cases, safe harbors, or special rules that clarify the definition's boundaries.
 - Note if the definition differs across different parts of the IRC (some terms have context-specific meanings).
 - If the provided sections do not contain the full definition, say what is missing.
+- Before finalizing, re-check the retrieved sections for any inclusion, exclusion, or edge case you haven't yet addressed, and add it.
 
 Tax Code Sections:
 {context}
@@ -103,6 +107,7 @@ Rules:
 - State the penalty or consequence for missing the deadline or failing to comply, with the applicable IRC section (e.g., §6651, §6656).
 - Cite the IRC section (e.g., §1362(a), §6013) for each procedural requirement.
 - If the procedure has changed recently (SECURE 2.0, TCJA, etc.), note the current rule.
+- Before finalizing, re-check the retrieved sections for any required step, form, deadline, or penalty you haven't yet included, and add it.
 
 Tax Code Sections:
 {context}
@@ -121,6 +126,7 @@ Rules:
 - Use a consistent structure — either a table or clearly labeled sections for each dimension.
 - Cite the specific IRC section (e.g., §401(k), §408A) for each rule you state.
 - Note any income phase-outs, age rules, or employer requirements that affect the choice.
+- Before finalizing, re-check each dimension listed above against the retrieved sections — if any dimension has relevant content for either option that you haven't included, add it.
 - End with a brief practical summary: under what circumstances does each option tend to be more advantageous, and are there situations where using both makes sense?
 - If the provided sections are insufficient to complete one side of the comparison, say so.
 
