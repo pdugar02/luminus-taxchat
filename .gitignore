@@ -13,6 +13,9 @@ env/
 ENV/
 .venv
 
+# Git worktrees
+.claude/worktrees/
+
 # IDE
 .vscode/
 .idea/

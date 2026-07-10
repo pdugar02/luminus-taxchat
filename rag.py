@@ -24,7 +24,7 @@ class TaxCodeRAG:
         chunks_path: Optional[str] = None,
         index_dir: Optional[str] = None,
         embedding_model: str = "nomic-custom",
-        ollama_model: str = "gemma4:e4b",
+        ollama_model: str = "gemma4:e2b",
         ollama_base_url: str = "http://localhost:11434",
         auto_build: bool = True,
     ):
@@ -218,11 +218,12 @@ class TaxCodeRAG:
         return sources
 
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, options: dict = None) -> str:
         """Call the configured LLM with a prompt and return the response text."""
         response = self._ollama.chat(
             model=self.ollama_model,
             messages=[{"role": "user", "content": prompt}],
+            options=options or {},
         )
         return response.message.content.strip()
 

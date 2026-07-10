@@ -85,9 +85,14 @@ class StructureFirstChunker:
         """
         boundaries = []
         
-        # Pattern: (lowercase_letter) followed by space and capital letter
-        # This matches subsection markers like "(a) Married individuals..." or "(b) Heads of households..."
-        pattern = r'\(([a-z])\)\s+([A-Z])'
+        # Pattern: (lowercase_letter) followed by space and capital letter, not immediately
+        # preceded by another ")" — top-level subsection markers like "(a) Married individuals..."
+        # stand alone, whereas nested paragraph/clause labels are chained directly onto their
+        # parent's label (e.g. "(f)(1)(A)(i)"). Without the lookbehind, single-letter roman
+        # numeral clause labels ("(i)", "(v)", "(x)"...) collide with the [a-z] pattern and get
+        # misdetected as new top-level subsections, shredding sections like §199A that are full
+        # of "(i) In general" clauses.
+        pattern = r'(?<!\))\(([a-z])\)\s+([A-Z])'
         
         for match in re.finditer(pattern, text):
             pos = match.start()

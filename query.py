@@ -106,8 +106,9 @@ def _parse_queries(raw: str, fallback: str) -> list[str]:
 
 def _classify_question(rag_system: TaxCodeRAG, question: str) -> str:
     """Ask the LLM to classify the question type; fall back to keyword heuristics."""
-    raw = rag_system.generate(CLASSIFY_PROMPT.format(question=question))
-    first_word = raw.strip().split()[0].lower().rstrip(".,:")
+    raw = rag_system.generate(CLASSIFY_PROMPT.format(question=question), options={"num_predict": 10, "temperature": 0})
+    words = raw.strip().split()
+    first_word = words[0].lower().rstrip(".,:") if words else ""
     if first_word in _ALL_TYPES:
         return first_word
 
