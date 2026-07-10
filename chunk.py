@@ -255,62 +255,37 @@ class StructureFirstChunker:
             end_char=len(text)
         )]
 
-    def _section_key(self, identifier: Optional[str]) -> Optional[str]:
-        """
-        Return the second-to-last character of the zero-padded identifier (integer string).
-        Used to decide if two consecutive chunks are in the same "section" for merging.
-        E.g. "4"/"5" -> "04"/"05" -> key "0" (merge); "68"/"71" -> "6"/"7" (do not merge).
-        Returns None if identifier is missing or length < 2 after padding.
-        """
-        if identifier is None:
-            return None
-        s = str(identifier).strip()
-        if not s:
-            return None
-        normalized = s.zfill(2)  # at least two chars: "4" -> "04"
-        return normalized[-2]
+    def _single_chunk_metadata(self, c: Dict) -> Dict:
+        """Build metadata for a chunk emitted on its own (not merged with others)."""
+        metadata = c.get('metadata', {}).copy()
+        metadata['tag'] = c.get('element_type', '')
+        metadata['identifier'] = c.get('identifier')
+        metadata['identifiers'] = [c.get('identifier')] if c.get('identifier') is not None else []
+        metadata['heading'] = metadata.get('heading', '')
+        metadata['element_id'] = c.get('id')
+        return metadata
 
     def _merge_small_chunks(
         self, chunks: List[Dict], start_idx: int
     ) -> Tuple[List[ContiguousChunk], int]:
         """
-        Merge small chunks (<min_tokens) with next consecutive chunks that share
-        the same section key (second-to-last digit of zero-padded identifier).
-        Stops when merged token count > max_tokens or no more same-section consecutive chunks.
+        Merge a small chunk (<min_tokens) with next consecutive chunks that are
+        also small. Each raw chunk is a whole <section> element (see
+        old_ingest.py XMLParser.CHUNKABLE_ELEMENTS), so a merge here always
+        combines multiple *distinct* legal sections, not pieces of one section.
+        A candidate is only folded in while it is itself small — a large
+        section is never absorbed, since re-splitting a multi-section blob by
+        generic (a)/(b)/(c) markers (_split_at_subsections) would blend one
+        section's heading onto another section's text.
+        Stops when merged token count > max_tokens or the next chunk isn't small.
         Returns (list of ContiguousChunk(s), next index to process).
         """
         if start_idx >= len(chunks):
             return [], start_idx
 
         first_chunk = chunks[start_idx]
-        section_key = self._section_key(first_chunk.get('identifier'))
-        if section_key is None:
-            # No merge: emit single chunk
-            c = first_chunk
-            text = self._clean_text(c.get('text', ''))
-            single = ContiguousChunk(
-                id=c.get('id'),
-                text=text,
-                parent_id=c.get('parent_id'),
-                children_ids=list(c.get('children_ids', [])),
-                metadata=c.get('metadata', {}).copy(),
-                chunk_index=None,
-                start_char=0,
-                end_char=len(text),
-            )
-            single.metadata['tag'] = c.get('element_type', '')
-            single.metadata['identifier'] = c.get('identifier')
-            single.metadata['identifiers'] = [c.get('identifier')] if c.get('identifier') is not None else []
-            single.metadata['heading'] = single.metadata.get('heading', '')
-            single.metadata['element_id'] = c.get('id')
-            return [single], start_idx + 1
-
         merged_parts = []
-        merged_metadata = first_chunk.get('metadata', {}).copy()
-        merged_metadata['tag'] = first_chunk.get('element_type', '')
-        merged_metadata['identifier'] = first_chunk.get('identifier')
-        merged_metadata['heading'] = merged_metadata.get('heading', '')
-        merged_metadata['element_id'] = first_chunk.get('id')
+        merged_metadata = self._single_chunk_metadata(first_chunk)
         total_tokens = 0
         chunk_ids = []
         children_ids = []
@@ -319,10 +294,10 @@ class StructureFirstChunker:
 
         while current_idx < len(chunks):
             chunk = chunks[current_idx]
-            if self._section_key(chunk.get('identifier')) != section_key:
-                break
             chunk_text = self._clean_text(chunk.get('text', ''))
             chunk_tokens = self.count_tokens(chunk_text)
+            if current_idx > start_idx and chunk_tokens >= self.min_tokens:
+                break
             if total_tokens + chunk_tokens > self.max_tokens and total_tokens >= self.min_tokens:
                 break
             section_identifiers.append(chunk.get('identifier'))
@@ -355,6 +330,16 @@ class StructureFirstChunker:
         merged_text = self._clean_text(merged_text)
         final_tokens = self.count_tokens(merged_text)
         if final_tokens > self.max_tokens:
+            if len(section_identifiers) > 1:
+                # Multiple distinct sections merged and the blob is still too
+                # big: splitting it as one unit would blend headings across
+                # sections. Split each original section independently instead.
+                out: List[ContiguousChunk] = []
+                for idx in range(start_idx, current_idx):
+                    c = chunks[idx]
+                    c_text = self._clean_text(c.get('text', ''))
+                    out.extend(self._split_large_chunk(c_text, c.get('id'), self._single_chunk_metadata(c)))
+                return out, current_idx
             split_chunks = self._split_large_chunk(merged_text, chunk_ids[0], merged_metadata)
             return split_chunks, current_idx
 
