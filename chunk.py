@@ -271,7 +271,7 @@ class StructureFirstChunker:
         """
         Merge a small chunk (<min_tokens) with next consecutive chunks that are
         also small. Each raw chunk is a whole <section> element (see
-        old_ingest.py XMLParser.CHUNKABLE_ELEMENTS), so a merge here always
+        xml_parser.py XMLParser.CHUNKABLE_ELEMENTS), so a merge here always
         combines multiple *distinct* legal sections, not pieces of one section.
         A candidate is only folded in while it is itself small — a large
         section is never absorbed, since re-splitting a multi-section blob by

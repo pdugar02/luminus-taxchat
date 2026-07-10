@@ -1,0 +1,566 @@
+"""
+XML Parser and Chunker for US Code Title 26 (Internal Revenue Code)
+Parses the XML file and extracts hierarchical chunks with parent/child relationships preserved.
+Extracts: subtitles → chapters → subchapters → parts (optional) → sections
+Only sections are chunked; subsections and paragraphs are included in section text.
+Subparagraphs and clauses are included in their parent paragraph text.
+Skips: editorial notes, repealed sections
+"""
+
+from lxml import etree
+from typing import List, Dict, Optional, Any
+import json
+from dataclasses import dataclass, asdict, replace
+
+
+@dataclass
+class Chunk:
+    """Represents a chunk of text with hierarchical metadata."""
+    id: str
+    text: str
+    element_type: str  # e.g., 'section', 'subsection'
+    identifier: Optional[str] = None  # e.g., "26 USC § 1"
+    parent_id: Optional[str] = None
+    children_ids: List[str] = None
+    metadata: Dict[str, Any] = None
+    
+    def __post_init__(self):
+        if self.children_ids is None:
+            self.children_ids = []
+        if self.metadata is None:
+            self.metadata = {}
+
+
+@dataclass
+class HierarchyContext:
+    """Tracks the current position in the document hierarchy."""
+    title: Optional[Dict[str, str]] = None      # {identifier, heading}
+    subtitle: Optional[Dict[str, str]] = None
+    chapter: Optional[Dict[str, str]] = None
+    subchapter: Optional[Dict[str, str]] = None
+    part: Optional[Dict[str, str]] = None
+    subpart: Optional[Dict[str, str]] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for metadata, excluding None values."""
+        result = {}
+        if self.title:
+            result['title'] = self.title
+        if self.subtitle:
+            result['subtitle'] = self.subtitle
+        if self.chapter:
+            result['chapter'] = self.chapter
+        if self.subchapter:
+            result['subchapter'] = self.subchapter
+        if self.part:
+            result['part'] = self.part
+        if self.subpart:
+            result['subpart'] = self.subpart
+        return result
+
+
+class XMLParser:
+    """Parser for USLM XML documents - Title 26 structure."""
+    
+    # Elements we want to extract (in hierarchical order)
+    STRUCTURAL_ELEMENTS = [
+        'title', 'subtitle', 'chapter', 'subchapter', 
+        'part', 'subpart', 'section', 'subsection', 
+        'paragraph', 'subparagraph', 'clause', 'subclause',
+        'item', 'subitem'
+    ]
+    
+    # Hierarchy elements that we track but don't chunk
+    HIERARCHY_ELEMENTS = ['title', 'subtitle', 'chapter', 'subchapter', 'part', 'subpart']
+    
+    # Elements that we actually chunk
+    CHUNKABLE_ELEMENTS = ['section']  # Only sections are chunked; subsections and paragraphs are included in section text
+    
+    def __init__(self, xml_path: str):
+        self.xml_path = xml_path
+        self.chunks: List[Chunk] = []
+        self.id_counter = 0
+        
+    def _extract_table(self, table_elem: etree.Element) -> Dict[str, Any]:
+        """Extract table content and convert to structured format."""
+        table_data = {
+            'headers': [],
+            'rows': [],
+            'text': ''
+        }
+        
+        # Extract headers from thead (handle namespaces)
+        # Find thead element
+        thead = None
+        for elem in table_elem.iter():
+            tag_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+            if tag_name == 'thead':
+                thead = elem
+                break
+        
+        if thead is not None:
+            # Find tr elements within thead (direct children first, then all)
+            # Try direct children first
+            for tr in thead:
+                tr_tag = tr.tag.split('}')[-1] if '}' in tr.tag else tr.tag
+                if tr_tag == 'tr':
+                    # Find th elements within this tr (direct children only)
+                    for th in tr:
+                        th_tag = th.tag.split('}')[-1] if '}' in th.tag else th.tag
+                        if th_tag == 'th':
+                            header_text = self._get_cell_text(th)
+                            if header_text:
+                                table_data['headers'].append(header_text)
+                    # Process all header rows (in case there are multiple)
+                    # But typically we only want the first row
+                    if table_data['headers']:
+                        break
+            
+            # If we didn't find headers in direct children, try iterating
+            if not table_data['headers']:
+                for tr in thead.iter():
+                    tr_tag = tr.tag.split('}')[-1] if '}' in tr.tag else tr.tag
+                    if tr_tag == 'tr':
+                        # Find th elements within this tr
+                        for th in tr.iter():
+                            th_tag = th.tag.split('}')[-1] if '}' in th.tag else th.tag
+                            if th_tag == 'th':
+                                header_text = self._get_cell_text(th)
+                                if header_text and header_text not in table_data['headers']:
+                                    table_data['headers'].append(header_text)
+                        if table_data['headers']:
+                            break
+        
+        # Extract rows from tbody (handle namespaces)
+        tbody = None
+        for elem in table_elem.iter():
+            tag_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+            if tag_name == 'tbody':
+                tbody = elem
+                break
+        
+        if tbody is not None:
+            # Find tr elements within tbody
+            for tr in tbody.iter():
+                tr_tag = tr.tag.split('}')[-1] if '}' in tr.tag else tr.tag
+                if tr_tag == 'tr':
+                    row = []
+                    # Find td elements within this tr (direct children only)
+                    for td in tr:
+                        td_tag = td.tag.split('}')[-1] if '}' in td.tag else td.tag
+                        if td_tag == 'td':
+                            cell_text = self._get_cell_text(td)
+                            row.append(cell_text)
+                    if row:
+                        table_data['rows'].append(row)
+        
+        # Create readable text representation as sentences
+        # Each row becomes a sentence: Header1 + Cell1, Header2 + Cell2, ...
+        sentences = []
+        headers = table_data['headers']
+        
+        for row in table_data['rows']:
+            sentence_parts = []
+            for i, cell in enumerate(row):
+                if i < len(headers):
+                    # Add header and cell as a pair
+                    header_cell_pair = f"{headers[i]} {cell}"
+                    sentence_parts.append(header_cell_pair)
+            # Join pairs with commas
+            sentences.append(', '.join(sentence_parts))
+        
+        table_data['text'] = '\n'.join(sentences)
+        
+        return table_data
+    
+    def _get_cell_text(self, cell_elem: etree.Element) -> str:
+        """Extract text from a table cell (td or th), including all nested elements."""
+        # Use itertext() to get all text content regardless of nesting
+        # This handles <b>, <span>, <p>, and any other nested elements
+        text_parts = []
+        
+        # Get all text from the element and all its descendants
+        for text in cell_elem.itertext():
+            cleaned = text.strip()
+            if cleaned:
+                text_parts.append(cleaned)
+        
+        # Join all text parts with spaces
+        result = ' '.join(text_parts).strip()
+        
+        # If we got nothing, try a fallback approach
+        if not result:
+            # Fallback: get direct text and text from direct children
+            if cell_elem.text:
+                text_parts.append(cell_elem.text.strip())
+            
+            for child in cell_elem:
+                # Recursively get text from child
+                child_text = self._get_cell_text(child)
+                if child_text:
+                    text_parts.append(child_text)
+                
+                # Add tail text
+                if child.tail:
+                    text_parts.append(child.tail.strip())
+            
+            result = ' '.join(text_parts).strip()
+        
+        return result
+    
+    def _identifier_to_label(self, identifier: Optional[str]) -> Optional[str]:
+        """Convert a full USLM identifier path into a parenthesized citation label.
+        e.g. "/us/usc/t26/s25A/g/1/A/i" -> "(g)(1)(A)(i)"
+        Returns None if the identifier isn't rooted in a section or has no nested path.
+        """
+        if not identifier:
+            return None
+        parts = identifier.split('/')
+        section_idx = None
+        for i, part in enumerate(parts):
+            if part.startswith('s') and len(part) > 1 and part[1].isdigit():
+                section_idx = i
+                break
+        if section_idx is None:
+            return None
+        nested_parts = parts[section_idx + 1:]
+        if not nested_parts:
+            return None
+        return ''.join(f"({p})" for p in nested_parts)
+
+    # Tags whose text must never flow into statute text (editorial apparatus).
+    DROP_TEXT_TAGS = {'note', 'notes', 'toc', 'sourceCredit', 'meta'}
+
+    # Structural tags flattened into section text with a full-path citation label.
+    LABELED_STRUCTURAL_TAGS = {
+        'subsection', 'paragraph', 'subparagraph', 'clause', 'subclause', 'item', 'subitem'
+    }
+
+    @staticmethod
+    def _join_text_parts(parts: List[str]) -> str:
+        """Join text parts with spaces, but attach leading punctuation to the
+        previous part (so tails like '.' after an inline element don't become ' .')."""
+        out = ''
+        for part in parts:
+            if not part:
+                continue
+            if out and not part.startswith((',', '.', ';', ':', ')', ']', '?', '!')):
+                out += ' '
+            out += part
+        return out
+
+    def _get_text_content(self, element: etree.Element, skip_notes: bool = True, suppress_num: bool = False) -> str:
+        """Extract text content from an element.
+
+        Uses a drop-list (DROP_TEXT_TAGS) rather than a whitelist: any child tag
+        not explicitly special-cased is recursed into and its text kept. The old
+        whitelist silently deleted the text of inline elements — every <date>
+        ("taxable years beginning after ,"), <quotedContent>, <subclause>, etc.
+        """
+        text_parts = []
+
+        # Get element's own text first
+        if element.text:
+            text_parts.append(element.text.strip())
+
+        for child in element:
+            # Skip all editorial apparatus (notes, source credits, ToC, etc.)
+            tag_name = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if skip_notes and tag_name in self.DROP_TEXT_TAGS:
+                continue
+
+            if tag_name == 'table':
+                # Extract table and include its text representation in the text flow
+                # Tables appear right after the content that introduces them (e.g., after paragraphs in a subsection)
+                table_data = self._extract_table(child)
+                if table_data and table_data.get('text'):
+                    text_parts.append(table_data['text'])
+            elif tag_name == 'heading':
+                # Include headings with a colon separator
+                child_text = self._get_text_content(child, skip_notes=True)
+                if child_text:
+                    # Add colon after heading to separate it from content
+                    text_parts.append(child_text + ':')
+            elif tag_name == 'num':
+                # Include numbers without colon (suppressed when the parent container
+                # already prepended a full-path label, e.g. "(g)(5)" instead of "(5)")
+                if not suppress_num:
+                    child_text = self._get_text_content(child, skip_notes=True)
+                    if child_text:
+                        text_parts.append(child_text)
+            elif tag_name in self.LABELED_STRUCTURAL_TAGS:
+                # Include subsections/paragraphs/subparagraphs/clauses/subclauses in
+                # section text (they're not chunked separately). Replace the child's
+                # own bare "(5)" label with a full-path label like "(g)(5)" derived
+                # from its identifier attribute, so nested citations aren't ambiguous
+                # once flattened into a single chunk (e.g. multiple paragraphs under
+                # one "(g)" heading).
+                label = self._identifier_to_label(child.get('identifier'))
+                if label:
+                    child_text = self._get_text_content(child, skip_notes=True, suppress_num=True)
+                    text_parts.append(f"{label} {child_text}".strip() if child_text else label)
+                else:
+                    child_text = self._get_text_content(child, skip_notes=True)
+                    if child_text:
+                        text_parts.append(child_text)
+            else:
+                # Everything else (content, p, chapeau, continuation, ref, date,
+                # inline, quotedContent, formatting tags, ...): recurse and keep text.
+                child_text = self._get_text_content(child, skip_notes=True)
+                if child_text:
+                    text_parts.append(child_text)
+
+            # Add tail text
+            if child.tail:
+                text_parts.append(child.tail.strip())
+
+        return self._join_text_parts(text_parts)
+    
+    def _get_identifier(self, element: etree.Element) -> Optional[str]:
+        """Extract identifier from element (e.g., section number)."""
+        # Check for identifier attribute
+        identifier = element.get('identifier')
+        if identifier:
+            # Extract just the section/subsection number from identifier
+            # e.g., "/us/usc/t26/s1503" -> "1503"
+            # e.g., "/us/usc/t26/s1503/a" -> "1503(a)"
+            parts = identifier.split('/')
+            if len(parts) > 0:
+                last_part = parts[-1]
+                if last_part.startswith('s'):
+                    # Section identifier
+                    section_num = last_part[1:]
+                    # Check if there's a subsection
+                    if len(parts) > 1 and parts[-2].startswith('s'):
+                        # This is a subsection
+                        parent_section = parts[-2][1:]
+                        subsection = section_num
+                        return f"{parent_section}({subsection})"
+                    return section_num
+                elif last_part.startswith('st'):
+                    # Subtitle
+                    return last_part[2:]  # e.g., "A"
+                elif last_part.startswith('ch'):
+                    # Chapter
+                    return last_part[2:]  # e.g., "1"
+                elif last_part.startswith('sch'):
+                    # Subchapter
+                    return last_part[3:]  # e.g., "A"
+                elif last_part.startswith('pt'):
+                    # Part
+                    return last_part[2:]  # e.g., "I"
+        
+        # Check for num element with value
+        for num_elem in element.iter():
+            tag_name = num_elem.tag.split('}')[-1] if '}' in num_elem.tag else num_elem.tag
+            if tag_name == 'num':
+                value = num_elem.get('value')
+                if value:
+                    return value
+                # Get text content if no value attribute
+                if num_elem.text:
+                    return num_elem.text.strip()
+                break
+        
+        return None
+    
+    def _get_heading(self, element: etree.Element) -> Optional[str]:
+        """Extract heading text from element."""
+        # Try to find heading element (handle namespaces)
+        for heading_elem in element.iter():
+            tag_name = heading_elem.tag.split('}')[-1] if '}' in heading_elem.tag else heading_elem.tag
+            if tag_name == 'heading':
+                heading_text = self._get_text_content(heading_elem, skip_notes=True)
+                if heading_text:
+                    return heading_text.strip()
+        return None
+    
+    def _is_repealed(self, element: etree.Element) -> bool:
+        """Check if an element is repealed or renumbered by looking at its heading.
+        Renumbered stubs like "[§ 36C. Renumbered § 23]" carry no statute text."""
+        heading = self._get_heading(element)
+        if heading and ('repealed' in heading.lower() or 'renumbered' in heading.lower()):
+            return True
+        return False
+
+    def _extract_effective_date_note(self, element: etree.Element, max_chars: int = 1200) -> Optional[str]:
+        """Extract the section's effective-date note text (topic 'effectiveDate', falling
+        back to the first 'effectiveDateOfAmendment' note, which is the most recent).
+        Returns a truncated plain-text string, or None."""
+        candidates = {'effectiveDate': None, 'effectiveDateOfAmendment': None}
+        for note in element.iter():
+            tag = note.tag.split('}')[-1] if '}' in note.tag else note.tag
+            if tag != 'note':
+                continue
+            topic = note.get('topic')
+            if topic in candidates and candidates[topic] is None:
+                text = ' '.join(t.strip() for t in note.itertext() if t.strip())
+                candidates[topic] = text
+        text = candidates['effectiveDate'] or candidates['effectiveDateOfAmendment']
+        if not text:
+            return None
+        return text[:max_chars]
+    
+    def _generate_id(self, element: etree.Element) -> str:
+        """Generate a unique ID for an element."""
+        # Use identifier if available
+        identifier = self._get_identifier(element)
+        tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        
+        if identifier:
+            return f"{tag_name}_{identifier.replace('/', '_')}"
+        
+        # Use element ID if available
+        elem_id = element.get('id')
+        if elem_id:
+            return elem_id
+        
+        # Generate sequential ID
+        self.id_counter += 1
+        return f"chunk_{self.id_counter}"
+    
+    def _extract_tables_from_element(self, element: etree.Element) -> List[Dict[str, Any]]:
+        """Extract tables from an element, including all tables from subsections and paragraphs within sections."""
+        tables = []
+        tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        
+        # For sections, extract all tables including those in subsections and paragraphs
+        # (since subsections and paragraphs are now included in section text)
+        if tag_name == 'section':
+            # Extract all tables from the section, including those in subsections and paragraphs
+            for table_elem in element.iter():
+                table_tag = table_elem.tag.split('}')[-1] if '}' in table_elem.tag else table_elem.tag
+                if table_tag == 'table':
+                    table_data = self._extract_table(table_elem)
+                    tables.append(table_data)
+        else:
+            # For other elements, extract all tables normally
+            for table_elem in element.iter():
+                table_tag = table_elem.tag.split('}')[-1] if '}' in table_elem.tag else table_elem.tag
+                if table_tag == 'table':
+                    table_data = self._extract_table(table_elem)
+                    tables.append(table_data)
+        
+        return tables
+    
+    def _create_chunk(self, element: etree.Element, parent_chunk: Optional[Chunk], hierarchy: HierarchyContext) -> Optional[Chunk]:
+        """Create a Chunk object from an element (only for sections, subsections, paragraphs)."""
+        # Skip if repealed
+        if self._is_repealed(element):
+            return None
+        
+        tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        chunk_id = self._generate_id(element)
+        parent_id = parent_chunk.id if parent_chunk else None
+        
+        # Extract full text content for sections (includes subsections and paragraphs)
+        # Tables are included in the text representation, so we don't need to extract them separately
+        text = self._get_text_content(element, skip_notes=True)
+        
+        # Skip if no meaningful text
+        if not text or len(text.strip()) < 3:
+            return None
+        
+        # Get identifier
+        identifier = self._get_identifier(element)
+        
+        # Get heading
+        heading = self._get_heading(element)
+        
+        # Build metadata with hierarchy chain
+        metadata = {
+            'tag': tag_name,
+            'element_id': element.get('id'),
+            'identifier': identifier,
+            'heading': heading,
+            'hierarchy': hierarchy.to_dict(),  # Include full hierarchy chain
+            'effective_date_note': self._extract_effective_date_note(element),
+        }
+        
+        # Add any other relevant attributes
+        for attr_name, attr_value in element.attrib.items():
+            if attr_name not in ['id', 'identifier']:
+                metadata[attr_name] = attr_value
+        
+        chunk = Chunk(
+            id=chunk_id,
+            text=text,
+            element_type=tag_name,
+            identifier=identifier,
+            parent_id=parent_id,
+            metadata=metadata
+        )
+        
+        return chunk
+    
+    def _process_element(self, element: etree.Element, parent_chunk: Optional[Chunk], hierarchy: HierarchyContext):
+        """Recursively process an element and its children, tracking hierarchy and creating chunks."""
+        tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        
+        # Skip non-structural elements we don't care about (notes, ToC, layout, table elements)
+        skip_tags = ['note', 'notes', 'toc', 'layout', 'thead', 'tbody', 'tr', 'td', 'th', 'colgroup', 'col']
+        if tag_name in skip_tags:
+            return
+        
+        # Start with the current hierarchy
+        current_hierarchy = hierarchy
+        
+        # If this is a hierarchy element (title, subtitle, chapter, etc.), update context but don't chunk
+        if tag_name in self.HIERARCHY_ELEMENTS:
+            # Extract identifier and heading for this hierarchy level
+            hierarchy_info = {
+                'identifier': self._get_identifier(element),
+                'heading': self._get_heading(element),
+            }
+            
+            # Create a new HierarchyContext with the updated field
+            current_hierarchy = replace(hierarchy, **{tag_name: hierarchy_info})
+        
+        # If this is a chunkable element (only sections now), create a chunk
+        elif tag_name in self.CHUNKABLE_ELEMENTS:
+            chunk = self._create_chunk(element, parent_chunk, current_hierarchy)
+            if chunk:
+                self.chunks.append(chunk)
+                parent_chunk = chunk
+        
+        # Process children with the updated hierarchy context
+        for child in element:
+            child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if child_tag not in skip_tags:
+                self._process_element(child, parent_chunk, current_hierarchy)
+    
+    def parse(self) -> List[Chunk]:
+        """Parse the XML file and extract chunks."""
+        print(f"Parsing XML file: {self.xml_path}")
+        
+        # Parse the XML file into a readable etree ElementTree object
+        tree = etree.parse(self.xml_path)
+        root = tree.getroot() #finds the root
+        
+        # Find the main content area
+        main = None
+        # Try to find main element
+        for elem in root.iter():
+            if elem.tag.endswith('}main'):
+                main = elem
+                break
+        
+        if main is None:
+            # If no main element, start from root
+            main = root
+        
+        # Recursively process elements starting from main with empty hierarchy context
+        self._process_element(main, None, HierarchyContext())
+        
+        print(f"Extracted {len(self.chunks)} chunks")
+        return self.chunks
+    
+    def save_chunks(self, output_path: str, format: str = 'json'):
+        """Save chunks to a file."""
+        if format == 'json':
+            chunks_dict = [asdict(chunk) for chunk in self.chunks]
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(chunks_dict, f, indent=2, ensure_ascii=False)
+            print(f"Saved {len(self.chunks)} chunks to {output_path}")
+        else:
+            raise ValueError(f"Unsupported format: {format}")

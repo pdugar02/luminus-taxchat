@@ -9,7 +9,7 @@ import re
 from dataclasses import asdict
 from pathlib import Path
 from chunk import chunk_for_rag_contiguous
-from old_scripts.old_ingest import XMLParser
+from xml_parser import XMLParser
 
 def clean_chunk_text(chunk_dict: dict) -> dict:
     """
