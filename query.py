@@ -72,6 +72,18 @@ If no: output one sentence describing the specific problem.
 Output nothing else."""
 
 
+# ── Follow-up condensation ────────────────────────────────────────────────────
+
+CONDENSE_PROMPT = """Given the conversation below, rewrite the user's latest message as a single, fully self-contained tax question. Resolve pronouns and implicit references ("it", "that deduction", "what about for X") using the conversation. Keep every specific fact that remains relevant (amounts, filing status, entity type, IRC sections mentioned). Return ONLY the rewritten question — no explanation.
+
+Conversation:
+{history}
+
+Latest message: {question}
+
+Standalone question:"""
+
+
 
 # ── Strategy routing table ────────────────────────────────────────────────────
 
@@ -104,10 +116,49 @@ def _parse_queries(raw: str, fallback: str) -> list[str]:
     return [cleaned or fallback]
 
 
+# Matches "§162", "section 199A", "sec. 401" in a user question.
+_CITED_SECTION_RE = re.compile(r'(?:§|\bsec(?:tion)?s?\.?\s+)\s*(\d+[A-Za-z]{0,2}(?:-\d+)?)', re.IGNORECASE)
+
+
+def _extract_cited_sections(question: str) -> list[str]:
+    """Return IRC section numbers the user explicitly cited, in order, deduplicated."""
+    return list(dict.fromkeys(m.group(1).upper() if m.group(1)[-1].isalpha() else m.group(1)
+                              for m in _CITED_SECTION_RE.finditer(question)))
+
+
+def _format_history(history: list[dict], max_messages: int = 6, max_chars: int = 500) -> str:
+    """Render recent conversation turns as plain text for prompting."""
+    lines = []
+    for msg in history[-max_messages:]:
+        role = "User" if msg.get("role") == "user" else "Assistant"
+        content = (msg.get("content") or "").strip()
+        if len(content) > max_chars:
+            content = content[:max_chars] + " […]"
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+def _condense_question(rag_system: TaxCodeRAG, question: str, history: list[dict]) -> str:
+    """Rewrite a follow-up into a standalone question using conversation history."""
+    raw = rag_system.generate(
+        CONDENSE_PROMPT.format(history=_format_history(history), question=question),
+        options={"temperature": 0},
+    )
+    standalone = raw.strip().strip('"')
+    # guard against a degenerate rewrite (empty or runaway output)
+    if not standalone or len(standalone) > 4 * max(len(question), 100):
+        return question
+    return standalone
+
+
 def _classify_question(rag_system: TaxCodeRAG, question: str) -> str:
     """Ask the LLM to classify the question type; fall back to keyword heuristics."""
-    raw = rag_system.generate(CLASSIFY_PROMPT.format(question=question))
-    first_word = raw.strip().split()[0].lower().rstrip(".,:")
+    raw = rag_system.generate(
+        CLASSIFY_PROMPT.format(question=question),
+        options={"num_predict": 10, "temperature": 0},
+    )
+    words = raw.strip().split()
+    first_word = words[0].lower().rstrip(".,:") if words else ""
     if first_word in _ALL_TYPES:
         return first_word
 
@@ -149,9 +200,32 @@ def get_rag(index_name: str = None, chunks_file: str = None) -> TaxCodeRAG:
     return rag
 
 
+def _format_context(sources: list[dict]) -> str:
+    """Render sources as the Tax Code Sections block, including where each section
+    lives in the code and its effective-date note when available."""
+    blocks = []
+    for s in sources:
+        meta = s.get("metadata", {})
+        header = f"[§{meta.get('identifier', '?')}]"
+        if meta.get("hierarchy_path"):
+            header += f" ({meta['hierarchy_path']})"
+        block = f"{header} {s['text']}"
+        note = (meta.get("effective_date_note") or "").strip()
+        if note:
+            block += f"\n(Effective date note: {note[:300]})"
+        blocks.append(block)
+    return "\n\n".join(blocks)
+
+
 def handle_query(data: dict) -> tuple[dict, int]:
-    """Handle query requests and return (payload, status_code)."""
+    """Handle query requests and return (payload, status_code).
+
+    Accepts an optional `history` list of {"role": "user"|"assistant", "content": str}
+    messages; follow-up questions are condensed into standalone questions before
+    retrieval so the pipeline works mid-conversation.
+    """
     question = data.get("question", "").strip()
+    history = data.get("history") or []
     retrieve_only = data.get("retrieve_only", False)
     if not question:
         return {"error": "Question is required", "sources": []}, 400
@@ -159,11 +233,25 @@ def handle_query(data: dict) -> tuple[dict, int]:
     rag_system = get_rag()
     start = time.time()
 
+    # resolve follow-ups against conversation history
+    if history:
+        t0 = time.time()
+        question = _condense_question(rag_system, question, history)
+        print(f"Condense:  {time.time() - t0:.1f}s — {question}")
+
     # classify and select type-specific strategy
     t0 = time.time()
     q_type = _classify_question(rag_system, question)
     strategy = _STRATEGY[q_type]
     print(f"Classify:  {time.time() - t0:.1f}s — {q_type}")
+
+    # exact-citation path: sections the user explicitly named are always included
+    cited = _extract_cited_sections(question)
+    pinned = rag_system.lookup_sections(cited, max_chunks_per_section=3)[:6]
+    for s in pinned:
+        s["score"] = 1.0  # pinned above any RRF score
+    if pinned:
+        print(f"Pinned:    {len(pinned)} chunks for cited §{', §'.join(cited)}")
 
     # expand the question into targeted IRC search queries
     t0 = time.time()
@@ -175,13 +263,16 @@ def handle_query(data: dict) -> tuple[dict, int]:
 
     # retrieve for each query; deduplicate by chunk ID keeping the highest RRF score
     t0 = time.time()
-    seen: dict[str, dict] = {}
+    seen: dict[str, dict] = {s["id"]: s for s in pinned}
     for q in queries:
         for source in rag_system.retrieve(q, top_k=strategy["top_k"]):
             sid = source["id"]
             if sid not in seen or source["score"] > seen[sid]["score"]:
                 seen[sid] = source
     sources = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:strategy["cap"]]
+
+    # one-hop cross-reference expansion: pull in sections the top chunks cite
+    sources += rag_system.expand_refs(sources, max_add=3)
     print(f"Retrieval: {time.time() - t0:.1f}s — {len(sources)} chunks")
 
     formatted_sources = [rag_system.format_source(s) for s in sources]
@@ -193,11 +284,7 @@ def handle_query(data: dict) -> tuple[dict, int]:
             "question_type": q_type,
         }, 200
 
-    context = "\n\n".join(
-        f"[§{s['metadata'].get('identifier', '?')}] {s['text']}"
-        for s in sources
-    )
-    # print(context)
+    context = _format_context(sources)
     t0 = time.time()
     answer = rag_system.generate(strategy["answer"].format(context=context, question=question))
     print(f"Answer:    {time.time() - t0:.1f}s")
@@ -208,9 +295,10 @@ def handle_query(data: dict) -> tuple[dict, int]:
     if verdict.strip().upper() != "PASS":
         feedback = verdict.strip()
         t0 = time.time()
+        # keep the feedback out of the statute context so it can't be cited as source text
         answer = rag_system.generate(strategy["answer"].format(
-            context=f"Note: a previous attempt had this issue: {feedback}. Fix it.\n\n{context}",
-            question=question,
+            context=context,
+            question=f"{question}\n\n(A previous draft of this answer was rejected because: {feedback} — make sure this answer fixes that.)",
         ))
         print(f"Retry:     {time.time() - t0:.1f}s")
 
@@ -219,4 +307,5 @@ def handle_query(data: dict) -> tuple[dict, int]:
         "answer": answer,
         "sources": formatted_sources,
         "question_type": q_type,
+        "standalone_question": question,
     }, 200

@@ -42,10 +42,28 @@ def clean_chunk_text(chunk_dict: dict) -> dict:
     
     # Normalize whitespace
     text = re.sub(r'\s+', ' ', text).strip()
-    
+
     # Update chunk with cleaned text
     chunk_dict['text'] = text
     return chunk_dict
+
+
+# Matches "section 212", "sections 401", "§ 199A", etc. in statute text.
+# (The USLM XML only hyperlinks refs to other titles/public laws, so intra-title
+# cross-references must be pulled from the text itself.)
+_SECTION_REF_RE = re.compile(r'(?:\bsections?|§)\s+(\d+[A-Z]{0,2}(?:-\d+)?)')
+
+
+def extract_ref_sections(text: str, own_identifiers: list) -> list:
+    """Return the sorted set of IRC section numbers cross-referenced in chunk text,
+    excluding the chunk's own section number(s)."""
+    own = set()
+    for i in own_identifiers or []:
+        m = re.match(r'\d+[A-Z]{0,2}(?:-\d+)?', str(i))
+        if m:
+            own.add(m.group(0))
+    refs = {m.group(1) for m in _SECTION_REF_RE.finditer(text)}
+    return sorted(refs - own)
 
 
 def main(chunk_size: int = 500, chunk_overlap: int = 50):
@@ -79,7 +97,13 @@ def main(chunk_size: int = 500, chunk_overlap: int = 50):
     # Apply structure-first chunking for RAG (with token counting)
     print(f"\nApplying structure-first chunking for RAG (chunk_size={chunk_size} tokens, chunk_overlap={chunk_overlap} tokens)...")
     rag_chunks = chunk_for_rag_contiguous(chunks_dict, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    
+
+    # Annotate each chunk with the IRC sections its text cross-references
+    for chunk in rag_chunks:
+        chunk['metadata']['ref_sections'] = extract_ref_sections(
+            chunk['text'], chunk['metadata'].get('identifiers') or []
+        )
+
     # Save RAG-ready chunks
     with open(rag_output_path, 'w', encoding='utf-8') as f:
         json.dump(rag_chunks, f, indent=2, ensure_ascii=False)

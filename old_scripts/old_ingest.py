@@ -231,37 +231,48 @@ class XMLParser:
             return None
         return ''.join(f"({p})" for p in nested_parts)
 
+    # Tags whose text must never flow into statute text (editorial apparatus).
+    DROP_TEXT_TAGS = {'note', 'notes', 'toc', 'sourceCredit', 'meta'}
+
+    # Structural tags flattened into section text with a full-path citation label.
+    LABELED_STRUCTURAL_TAGS = {
+        'subsection', 'paragraph', 'subparagraph', 'clause', 'subclause', 'item', 'subitem'
+    }
+
+    @staticmethod
+    def _join_text_parts(parts: List[str]) -> str:
+        """Join text parts with spaces, but attach leading punctuation to the
+        previous part (so tails like '.' after an inline element don't become ' .')."""
+        out = ''
+        for part in parts:
+            if not part:
+                continue
+            if out and not part.startswith((',', '.', ';', ':', ')', ']', '?', '!')):
+                out += ' '
+            out += part
+        return out
+
     def _get_text_content(self, element: etree.Element, skip_notes: bool = True, suppress_num: bool = False) -> str:
-        """Extract text content from an element, skipping notes and structural children."""
+        """Extract text content from an element.
+
+        Uses a drop-list (DROP_TEXT_TAGS) rather than a whitelist: any child tag
+        not explicitly special-cased is recursed into and its text kept. The old
+        whitelist silently deleted the text of inline elements — every <date>
+        ("taxable years beginning after ,"), <quotedContent>, <subclause>, etc.
+        """
         text_parts = []
-        
+
         # Get element's own text first
         if element.text:
             text_parts.append(element.text.strip())
-        
-        # Define hierarchy: skip structural children that will be chunked separately
-        # Note: Since only sections are chunked, we include subsections and paragraphs in section text
-        skip_structural_children = []
-        # Sections include all subsections and paragraphs in their text (don't skip them)
-        # Subsections and paragraphs are not chunked separately anymore
-        
+
         for child in element:
-            # Skip all note elements (editorial notes, amendments, etc.)
+            # Skip all editorial apparatus (notes, source credits, ToC, etc.)
             tag_name = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-            if skip_notes and tag_name == 'note':
+            if skip_notes and tag_name in self.DROP_TEXT_TAGS:
                 continue
-            
-            # Skip structural children that will be chunked separately
-            if tag_name in skip_structural_children:
-                continue
-            
-            # Extract content from various content elements
-            if tag_name == 'content':
-                # Get all text from content element
-                content_text = self._get_text_content(child, skip_notes=True)
-                if content_text:
-                    text_parts.append(content_text)
-            elif tag_name == 'table':
+
+            if tag_name == 'table':
                 # Extract table and include its text representation in the text flow
                 # Tables appear right after the content that introduces them (e.g., after paragraphs in a subsection)
                 table_data = self._extract_table(child)
@@ -280,18 +291,13 @@ class XMLParser:
                     child_text = self._get_text_content(child, skip_notes=True)
                     if child_text:
                         text_parts.append(child_text)
-            elif tag_name in ['p', 'chapeau', 'continuation']:
-                # Include actual content paragraphs, chapeau, and continuation text
-                # Continuation elements may contain tables, which will be processed recursively
-                child_text = self._get_text_content(child, skip_notes=True)
-                if child_text:
-                    text_parts.append(child_text)
-            elif tag_name in ['subsection', 'paragraph', 'subparagraph', 'clause']:
-                # Include subsections/paragraphs/subparagraphs/clauses in section text
-                # (they're not chunked separately). Replace the child's own bare "(5)"
-                # label with a full-path label like "(g)(5)" derived from its identifier
-                # attribute, so nested citations aren't ambiguous once flattened into
-                # a single chunk (e.g. multiple paragraphs under one "(g)" heading).
+            elif tag_name in self.LABELED_STRUCTURAL_TAGS:
+                # Include subsections/paragraphs/subparagraphs/clauses/subclauses in
+                # section text (they're not chunked separately). Replace the child's
+                # own bare "(5)" label with a full-path label like "(g)(5)" derived
+                # from its identifier attribute, so nested citations aren't ambiguous
+                # once flattened into a single chunk (e.g. multiple paragraphs under
+                # one "(g)" heading).
                 label = self._identifier_to_label(child.get('identifier'))
                 if label:
                     child_text = self._get_text_content(child, skip_notes=True, suppress_num=True)
@@ -300,12 +306,18 @@ class XMLParser:
                     child_text = self._get_text_content(child, skip_notes=True)
                     if child_text:
                         text_parts.append(child_text)
-            
+            else:
+                # Everything else (content, p, chapeau, continuation, ref, date,
+                # inline, quotedContent, formatting tags, ...): recurse and keep text.
+                child_text = self._get_text_content(child, skip_notes=True)
+                if child_text:
+                    text_parts.append(child_text)
+
             # Add tail text
             if child.tail:
                 text_parts.append(child.tail.strip())
-        
-        return ' '.join(text_parts)
+
+        return self._join_text_parts(text_parts)
     
     def _get_identifier(self, element: etree.Element) -> Optional[str]:
         """Extract identifier from element (e.g., section number)."""
@@ -367,11 +379,30 @@ class XMLParser:
         return None
     
     def _is_repealed(self, element: etree.Element) -> bool:
-        """Check if an element is repealed by looking for 'Repealed' in heading."""
+        """Check if an element is repealed or renumbered by looking at its heading.
+        Renumbered stubs like "[§ 36C. Renumbered § 23]" carry no statute text."""
         heading = self._get_heading(element)
-        if heading and 'repealed' in heading.lower():
+        if heading and ('repealed' in heading.lower() or 'renumbered' in heading.lower()):
             return True
         return False
+
+    def _extract_effective_date_note(self, element: etree.Element, max_chars: int = 1200) -> Optional[str]:
+        """Extract the section's effective-date note text (topic 'effectiveDate', falling
+        back to the first 'effectiveDateOfAmendment' note, which is the most recent).
+        Returns a truncated plain-text string, or None."""
+        candidates = {'effectiveDate': None, 'effectiveDateOfAmendment': None}
+        for note in element.iter():
+            tag = note.tag.split('}')[-1] if '}' in note.tag else note.tag
+            if tag != 'note':
+                continue
+            topic = note.get('topic')
+            if topic in candidates and candidates[topic] is None:
+                text = ' '.join(t.strip() for t in note.itertext() if t.strip())
+                candidates[topic] = text
+        text = candidates['effectiveDate'] or candidates['effectiveDateOfAmendment']
+        if not text:
+            return None
+        return text[:max_chars]
     
     def _generate_id(self, element: etree.Element) -> str:
         """Generate a unique ID for an element."""
@@ -446,6 +477,7 @@ class XMLParser:
             'identifier': identifier,
             'heading': heading,
             'hierarchy': hierarchy.to_dict(),  # Include full hierarchy chain
+            'effective_date_note': self._extract_effective_date_note(element),
         }
         
         # Add any other relevant attributes

@@ -483,6 +483,7 @@
     <script>
         let retrieveOnly = false;
         let chunkCounter = 0; // Global counter for unique chunk IDs
+        let chatHistory = []; // [{role: 'user'|'assistant', content: string}, ...]
 
         function toggleRetrieve() {
             retrieveOnly = !retrieveOnly;
@@ -527,7 +528,8 @@
                     },
                     body: JSON.stringify({
                         question: question,
-                        retrieve_only: retrieveOnly
+                        retrieve_only: retrieveOnly,
+                        history: chatHistory
                     })
                 });
 
@@ -539,6 +541,9 @@
                 if (response.ok) {
                     // Add assistant response
                     addAssistantMessage(data.answer, data.chunks || [], data.sources || []);
+                    // Record the turn so follow-up questions carry context
+                    chatHistory.push({role: 'user', content: question});
+                    chatHistory.push({role: 'assistant', content: data.answer});
                 } else {
                     addErrorMessage(data.error || 'An error occurred');
                 }

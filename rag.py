@@ -4,6 +4,7 @@ Uses Ollama for embeddings and LLM, ChromaDB for vector storage.
 """
 
 import json
+import re
 from pathlib import Path
 from typing import List, Dict, Optional
 import tiktoken
@@ -12,6 +13,29 @@ import ollama as _ollama
 from rank_bm25 import BM25Okapi
 
 COLLECTION_NAME = "tax_code_rag"
+
+# nomic-embed-text task prefixes (asymmetric search); applied at embed time only,
+# never stored in documents.
+EMBED_DOC_PREFIX = "search_document: "
+EMBED_QUERY_PREFIX = "search_query: "
+
+
+def _tokenize(text: str) -> List[str]:
+    """Tokenize for BM25: lowercase alphanumeric runs, so '§162(a)' matches '162 a'."""
+    return re.findall(r'[a-z0-9]+', text.lower())
+
+
+def _hierarchy_path(metadata: Dict) -> str:
+    """Render a chunk's hierarchy chain as a readable path of headings,
+    e.g. 'Income Taxes › Normal Taxes and Surtaxes › Computation of Taxable Income'."""
+    hierarchy = metadata.get("hierarchy") or {}
+    parts = []
+    for level in ("subtitle", "chapter", "subchapter", "part", "subpart"):
+        info = hierarchy.get(level) or {}
+        heading = (info.get("heading") or "").strip()
+        if heading:
+            parts.append(heading)
+    return " › ".join(parts)
 
 
 class TaxCodeRAG:
@@ -50,6 +74,7 @@ class TaxCodeRAG:
         self.collection = None
         self.bm25 = None
         self._bm25_chunks: List[Dict] = []
+        self._section_map: Dict[str, List[Dict]] = {}
 
         if auto_build:
             self._init_index()
@@ -60,17 +85,40 @@ class TaxCodeRAG:
         self._build_bm25_index()
 
     def _build_bm25_index(self):
-        """Build an in-memory BM25 index from the texts already stored in ChromaDB."""
+        """Build an in-memory BM25 index and a section-number → chunks map
+        from the texts already stored in ChromaDB."""
         all_data = self.collection.get(include=["documents", "metadatas"])
         ids = all_data["ids"]
         docs = all_data["documents"]
-        metadatas = all_data["metadatas"]
+        metadatas = [self._decode_meta(m) for m in all_data["metadatas"]]
         self._bm25_chunks = [
             {"id": ids[i], "text": docs[i], "metadata": metadatas[i]}
             for i in range(len(ids))
         ]
-        self.bm25 = BM25Okapi([doc.lower().split() for doc in docs])
-        print(f"BM25 index built ({len(docs)} documents)")
+        self.bm25 = BM25Okapi([_tokenize(doc) for doc in docs])
+
+        # exact-citation lookup: section number → list of chunks, in document order
+        self._section_map: Dict[str, List[Dict]] = {}
+        for chunk in self._bm25_chunks:
+            for ident in chunk["metadata"].get("identifiers") or []:
+                # index by the bare section number ("162" for "162(a)")
+                m = re.match(r'\d+[A-Z]{0,2}(?:-\d+)?', str(ident))
+                if m:
+                    self._section_map.setdefault(m.group(0), []).append(chunk)
+        print(f"BM25 index built ({len(docs)} documents, {len(self._section_map)} sections)")
+
+    @staticmethod
+    def _decode_meta(meta: Dict) -> Dict:
+        """Decode JSON-encoded list fields from Chroma's flat metadata."""
+        out = dict(meta or {})
+        for key in ("identifiers", "ref_sections"):
+            val = out.get(key)
+            if isinstance(val, str):
+                try:
+                    out[key] = json.loads(val)
+                except json.JSONDecodeError:
+                    out[key] = []
+        return out
 
     def _load_chunks(self) -> List[Dict]:
         """Load chunks from the saved chunks_path"""
@@ -94,6 +142,11 @@ class TaxCodeRAG:
             prefix_parts.append("§" + ", §".join(str(i) for i in ids))
         if metadata.get("heading"):
             prefix_parts.append(metadata["heading"])
+        # hierarchy context (chapter/subchapter/part headings) disambiguates
+        # similarly-worded sections in different areas of the code
+        hierarchy_path = metadata.get("hierarchy_path") or _hierarchy_path(metadata)
+        if hierarchy_path:
+            prefix_parts.append(f"[{hierarchy_path}]")
         prefix = f"{' '.join(prefix_parts)}: " if prefix_parts else ""
 
         # create the full text chunk and embed it with the token encoder
@@ -123,17 +176,29 @@ class TaxCodeRAG:
             batch = chunks[start : start + BATCH]
             texts = [self._prepare_chunk_text(c) for c in batch]
             ids = [c["id"] for c in batch]
-            metadatas = [
-                {
-                    "identifier": str(c.get("metadata", {}).get("identifier") or ""),
-                    "heading": (c.get("metadata", {}).get("heading") or "")[:100],
-                    "tag": c.get("metadata", {}).get("tag") or "",
-                }
-                for c in batch
-            ]
+            metadatas = []
+            for c in batch:
+                m = c.get("metadata", {})
+                identifiers = m.get("identifiers") or (
+                    [m["identifier"]] if m.get("identifier") is not None else []
+                )
+                metadatas.append({
+                    "identifier": str(m.get("identifier") or ""),
+                    "identifiers": json.dumps([str(i) for i in identifiers if i is not None]),
+                    "heading": (m.get("heading") or "")[:100],
+                    "tag": m.get("tag") or "",
+                    "hierarchy_path": _hierarchy_path(m)[:300],
+                    "parent_id": str(m.get("parent_id") or ""),
+                    "ref_sections": json.dumps(m.get("ref_sections") or []),
+                    "effective_date_note": (m.get("effective_date_note") or "")[:1200],
+                    "token_count": int(m.get("token_count") or 0),
+                })
 
-            # embed the chunk and add it ot chroma db
-            result = self._ollama.embed(model=self.embedding_model, input=texts)
+            # embed the chunk (with the nomic document-task prefix) and add it to chroma db;
+            # the stored document text stays unprefixed
+            result = self._ollama.embed(
+                model=self.embedding_model, input=[EMBED_DOC_PREFIX + t for t in texts]
+            )
             collection.add(ids=ids, embeddings=result.embeddings, documents=texts, metadatas=metadatas)
             print(f"  Indexed {min(start + BATCH, total)}/{total} chunks", end="\r")
 
@@ -153,7 +218,9 @@ class TaxCodeRAG:
         candidate_k = top_k * 3  # fetch more candidates from each source before merging
 
         # --- semantic search via ChromaDB ---
-        embedded_query = self._ollama.embed(model=self.embedding_model, input=[question])
+        embedded_query = self._ollama.embed(
+            model=self.embedding_model, input=[EMBED_QUERY_PREFIX + question]
+        )
         results = self.collection.query(
             query_embeddings=[embedded_query.embeddings[0]],
             n_results=candidate_k,
@@ -161,38 +228,28 @@ class TaxCodeRAG:
         )
         semantic_hits: Dict[str, dict] = {}
         for i, doc in enumerate(results["documents"][0]):
-            meta = results["metadatas"][0][i]
             chunk_id = results["ids"][0][i]
             semantic_hits[chunk_id] = {
                 "id": chunk_id,
                 "text": doc,
                 "score": 0.0,
-                "metadata": {
-                    "identifier": meta.get("identifier"),
-                    "heading": meta.get("heading"),
-                    "tag": meta.get("tag"),
-                },
+                "metadata": self._decode_meta(results["metadatas"][0][i]),
             }
 
         # --- BM25 keyword search ---
         bm25_hits: Dict[str, dict] = {}
         if self.bm25 is not None:
-            token_scores = self.bm25.get_scores(question.lower().split())
+            token_scores = self.bm25.get_scores(_tokenize(question))
             # get indices of top candidate_k scores
             top_indices = sorted(range(len(token_scores)), key=lambda i: token_scores[i], reverse=True)[:candidate_k]
             for idx in top_indices:
                 chunk = self._bm25_chunks[idx]
-                chunk_id = chunk["id"]
-                meta = chunk.get("metadata", {})
-                bm25_hits[chunk_id] = {
-                    "id": chunk_id,
-                    "text": self._prepare_chunk_text(chunk),
+                # chunk text came from Chroma documents, which are already prefixed
+                bm25_hits[chunk["id"]] = {
+                    "id": chunk["id"],
+                    "text": chunk["text"],
                     "score": 0.0,
-                    "metadata": {
-                        "identifier": str(meta.get("identifier") or ""),
-                        "heading": meta.get("heading") or "",
-                        "tag": meta.get("tag") or "",
-                    },
+                    "metadata": chunk.get("metadata", {}),
                 }
 
         # --- Reciprocal Rank Fusion ---
@@ -217,12 +274,58 @@ class TaxCodeRAG:
             sources.append(hit)
         return sources
 
+    def lookup_sections(self, section_numbers: List[str], max_chunks_per_section: int = 4) -> List[Dict]:
+        """Exact-citation retrieval: return the chunks for the given IRC section
+        numbers (bare numbers like '162' or '199A'), in document order."""
+        sources = []
+        for num in section_numbers:
+            for chunk in self._section_map.get(str(num), [])[:max_chunks_per_section]:
+                sources.append({
+                    "id": chunk["id"],
+                    "text": chunk["text"],
+                    "score": 0.0,
+                    "metadata": chunk.get("metadata", {}),
+                })
+        return sources
 
-    def generate(self, prompt: str) -> str:
+    def expand_refs(self, sources: List[Dict], max_add: int = 4) -> List[Dict]:
+        """One-hop cross-reference expansion: for the given sources, pull in the
+        first chunk of each IRC section their text references (deduplicated
+        against sources already present), up to max_add chunks."""
+        have_ids = {s["id"] for s in sources}
+        have_sections = set()
+        for s in sources:
+            for ident in s.get("metadata", {}).get("identifiers") or []:
+                m = re.match(r'\d+[A-Z]{0,2}(?:-\d+)?', str(ident))
+                if m:
+                    have_sections.add(m.group(0))
+
+        added = []
+        for s in sources:
+            for ref in s.get("metadata", {}).get("ref_sections") or []:
+                if len(added) >= max_add:
+                    return added
+                if ref in have_sections:
+                    continue
+                chunks = self._section_map.get(str(ref), [])
+                if chunks and chunks[0]["id"] not in have_ids:
+                    chunk = chunks[0]
+                    added.append({
+                        "id": chunk["id"],
+                        "text": chunk["text"],
+                        "score": 0.0,
+                        "metadata": chunk.get("metadata", {}),
+                    })
+                    have_ids.add(chunk["id"])
+                    have_sections.add(ref)
+        return added
+
+    def generate(self, prompt: str, options: Optional[dict] = None) -> str:
         """Call the configured LLM with a prompt and return the response text."""
         response = self._ollama.chat(
             model=self.ollama_model,
             messages=[{"role": "user", "content": prompt}],
+            options=options or {},
         )
         return response.message.content.strip()
 
