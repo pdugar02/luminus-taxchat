@@ -33,5 +33,7 @@
   {"question": "What is the foreign earned income exclusion?", "expected_sections": ["911"], "type": "definitional"},
   {"question": "What startup costs can I deduct when starting a new business?", "expected_sections": ["195"], "type": "application"},
   {"question": "What does section 162 allow me to deduct for my business?", "expected_sections": ["162"], "type": "survey"},
-  {"question": "What are the exceptions to the 10% early withdrawal penalty on retirement accounts?", "expected_sections": ["72"], "type": "exception"}
+  {"question": "What are the exceptions to the 10% early withdrawal penalty on retirement accounts?", "expected_sections": ["72"], "type": "exception"},
+  {"question": "Can a new business deduct expenses in the first year of operations without having any revenues? If so, what limits and conditions apply?", "expected_sections": ["195"], "type": "exception"},
+  {"question": "What are the % and $ limits for company match for an employee participating in a regular 401k plan?", "expected_sections": ["415", "401"], "type": "application"}
 ]
