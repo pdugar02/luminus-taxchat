@@ -375,7 +375,7 @@ def handle_query(data: dict) -> tuple[dict, int]:
         "Question: {question}", _CONCISE_DIRECTIVE + "Question: {question}"
     ).format(context=context, question=question)
     t0 = time.time()
-    answer = rag_system.generate(answer_prompt, options=_GENERATION_OPTIONS, label="answer")
+    answer = rag_system.generate(answer_prompt, options=_GENERATION_OPTIONS, think=False, label="answer")
     print(f"Answer:    {time.time() - t0:.1f}s")
 
     # Verify/retry pass disabled for latency: it costs ~56s (mostly the model's thinking)
