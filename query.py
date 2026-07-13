@@ -258,8 +258,16 @@ def get_rag(index_name: str = None, chunks_file: str = None) -> TaxCodeRAG:
 # tokens each, and overflowing num_ctx makes Ollama silently truncate the prompt
 # (observed as empty answers). Sources are ranked, so the lowest-ranked chunks
 # are dropped first.
-_CONTEXT_TOKEN_BUDGET = 9000
+_CONTEXT_TOKEN_BUDGET = 5000
 _GENERATION_OPTIONS = {"num_ctx": 16384}
+
+# Appended to the answer prompt to trim the written half of generation (the model
+# was decoding ~1000 content tokens per answer). Thinking stays on for accuracy.
+_CONCISE_DIRECTIVE = (
+    "Keep your answer concise and focused: lead with the direct answer, include only "
+    "the rules, figures, and section numbers that matter, and do not restate the question "
+    "or quote statute text at length.\n\n"
+)
 
 _token_encoder = tiktoken.get_encoding("cl100k_base")
 
@@ -362,6 +370,10 @@ def handle_query(data: dict) -> tuple[dict, int]:
         }, 200
 
     context = _format_context(sources)
+    # inject the concision directive just before the "Question:" cue in every answer template
+    answer_prompt = strategy["answer"].replace(
+        "Question: {question}", _CONCISE_DIRECTIVE + "Question: {question}"
+    ).format(context=context, question=question)
     t0 = time.time()
     answer = rag_system.generate(answer_prompt, options=_GENERATION_OPTIONS, label="answer")
     print(f"Answer:    {time.time() - t0:.1f}s")
