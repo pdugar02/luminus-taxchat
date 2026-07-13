@@ -101,6 +101,51 @@ _STRATEGY = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+# The model writes citations and formulas in LaTeX ($\S 1401(\text{a})$,
+# $\frac{1}{2}$), which the UI's markdown renderer passes through as literal
+# text. Convert to plain Unicode before returning the answer. Real currency
+# amounts ($250,000) are left untouched.
+_LATEX_SYMBOLS = [
+    (re.compile(r"\\frac\{1\}\{2\}"), "½"),
+    (re.compile(r"\\frac\{([^{}]*)\}\{([^{}]*)\}"), r"\1/\2"),
+    (re.compile(r"\\S(?![A-Za-z])"), "§"),
+    (re.compile(r"\\times\b"), "×"),
+    (re.compile(r"\\geq?\b"), "≥"),
+    (re.compile(r"\\leq?\b"), "≤"),
+    (re.compile(r"\\(?:rightarrow|to)\b|\\xrightarrow\{[^{}]*\}"), "→"),
+    (re.compile(r"\\Rightarrow\b"), "⇒"),
+    (re.compile(r"\\cdot\b"), "·"),
+    (re.compile(r"\\approx\b"), "≈"),
+    (re.compile(r"\\pm\b"), "±"),
+    (re.compile(r"\\%"), "%"),
+    (re.compile(r"\\quad\b|\\,|\\;"), " "),
+    (re.compile(r"\\(?:left|right)(?=[(){}\[\]|.])"), ""),
+]
+
+
+def _clean_latex(text: str) -> str:
+    """Convert the model's LaTeX-ish notation to plain Unicode for display."""
+    # A math span wrapping an escaped currency amount ($\$2,500,000$) is the model
+    # quoting a dollar figure "mathematically" — unwrap it to a plain $2,500,000 now,
+    # before the \$-protection below strips the backslash this shape is recognized by.
+    text = re.sub(r"\$\\\$([^$\n]*?)\$", r"$\1", text)
+    text = text.replace("\\$", "\x00")  # protect remaining escaped (real) dollar signs
+    # unwrap math delimiters: $$...$$ blocks, then $...$ spans that are clearly math —
+    # they contain a LaTeX command, a comparator, or a bare section citation. A lone
+    # $250,000 or a "$5,000 to $10,000" range never matches these shapes.
+    text = re.sub(r"\$\$([^$]+)\$\$", r"\1", text)
+    text = re.sub(r"\$([^$\n]*\\[^$\n]*)\$", r"\1", text)
+    text = re.sub(r"\$([^$\n]*[<>=≤≥][^$\n]*)\$", r"\1", text)
+    text = re.sub(r"\$(\d+(?:\([^)$\n]*\))+)\$", r"\1", text)
+    for _ in range(2):  # unwrap nested \text{\text{...}}
+        text = re.sub(r"\\(?:text|mathrm|mathbf|mathit|mathsf)\{([^{}]*)\}", r"\1", text)
+    for pattern, repl in _LATEX_SYMBOLS:
+        text = pattern.sub(repl, text)
+    text = re.sub(r"\\([A-Za-z]+)", r"\1", text)  # drop any leftover \commands
+    text = re.sub(r"§\s+(?=\d)", "§", text)  # "§ 162" → "§162", matching app style
+    return text.replace("\x00", "$")
+
+
 def _parse_queries(raw: str, fallback: str) -> list[str]:
     """Parse LLM output into a list of query strings, falling back to raw text."""
     cleaned = re.sub(r'```(?:json)?\s*|\s*```', '', raw).strip()
@@ -403,7 +448,7 @@ def handle_query(data: dict) -> tuple[dict, int]:
 
     print(f"Total:     {time.time() - start:.1f}s")
     return {
-        "answer": answer,
+        "answer": _clean_latex(answer),
         "sources": formatted_sources,
         "question_type": q_type,
         "standalone_question": question,
