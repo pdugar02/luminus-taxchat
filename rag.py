@@ -308,7 +308,7 @@ class TaxCodeRAG:
                 })
         return sources
 
-    def expand_refs(self, sources: List[Dict], max_add: int = 4) -> List[Dict]:
+    def expand_refs(self, sources: List[Dict], max_add: int = 0) -> List[Dict]:
         """One-hop cross-reference expansion: for the given sources, pull in the
         first chunk of each IRC section their text references (deduplicated
         against sources already present), up to max_add chunks."""
