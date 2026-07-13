@@ -38,6 +38,21 @@ def _hierarchy_path(metadata: Dict) -> str:
     return " › ".join(parts)
 
 
+def _log_llm_timing(response, label: str = "") -> None:
+    """Print Ollama's prefill (prompt) vs decode (generation) breakdown for a call,
+    so we can see whether time is spent reading context or writing the answer.
+    Durations are nanoseconds; prompt fields are omitted when the prefill is cached."""
+    ptok = getattr(response, "prompt_eval_count", None)
+    pdur = getattr(response, "prompt_eval_duration", None) or 0
+    otok = getattr(response, "eval_count", None)
+    odur = getattr(response, "eval_duration", None) or 0
+    prefill = f"{ptok} tok/{pdur / 1e9:.1f}s" if ptok else "cached"
+    tps = (otok / (odur / 1e9)) if otok and odur else 0.0
+    decode = f"{otok or 0} tok/{odur / 1e9:.1f}s ({tps:.1f} tok/s)"
+    tag = f"{label} " if label else ""
+    print(f"  llm {tag}: prefill {prefill} · decode {decode}")
+
+
 class TaxCodeRAG:
     """RAG system for querying the US Tax Code."""
 
@@ -327,6 +342,7 @@ class TaxCodeRAG:
             messages=[{"role": "user", "content": prompt}],
             options=options or {},
         )
+        _log_llm_timing(response, label)
         return response.message.content.strip()
 
     def format_source(self, source: Dict, preview_length: int = 200) -> Dict:
