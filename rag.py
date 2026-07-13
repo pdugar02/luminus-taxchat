@@ -58,6 +58,11 @@ class TaxCodeRAG:
 
     MAX_EMBEDDING_TOKENS = 1800
 
+    # Fixed context window applied to every generate() call. Ollama reloads the
+    # model whenever num_ctx changes between calls, so a single shared value keeps
+    # the model loaded once (with keep_alive) instead of reloading each step.
+    LLM_NUM_CTX = 16384
+
     def __init__(
         self,
         chunks_path: Optional[str] = None,
@@ -335,12 +340,23 @@ class TaxCodeRAG:
                     have_sections.add(ref)
         return added
 
-    def generate(self, prompt: str, options: Optional[dict] = None) -> str:
-        """Call the configured LLM with a prompt and return the response text."""
+    def generate(self, prompt: str, options: Optional[dict] = None, label: str = "",
+                 think: Optional[bool] = None) -> str:
+        """Call the configured LLM with a prompt and return the response text.
+
+        `think` controls the model's reasoning: gemma4:e4b is a reasoning model whose
+        chain-of-thought is decoded before the answer (and billed as tokens). Pass
+        think=False to skip it on steps where it adds no value (e.g. query expansion).
+        """
+        # Pin num_ctx across all calls so Ollama never reloads the model to resize
+        # its context window (a reload costs ~20s and defeats keep_alive).
+        merged_options = {"num_ctx": self.LLM_NUM_CTX, **(options or {})}
         response = self._ollama.chat(
             model=self.ollama_model,
             messages=[{"role": "user", "content": prompt}],
-            options=options or {},
+            options=merged_options,
+            think=think,
+            keep_alive=-1
         )
         _log_llm_timing(response, label)
         return response.message.content.strip()

@@ -326,9 +326,13 @@ def handle_query(data: dict) -> tuple[dict, int]:
     if pinned:
         print(f"Pinned:    {len(pinned)} chunks for cited §{', §'.join(cited)}")
 
-    # expand the question into targeted IRC search queries
+    # expand the question into targeted IRC search queries — no chain-of-thought
+    # needed here, so skip the model's (expensive) thinking and cap the output
     t0 = time.time()
-    raw_expansion = rag_system.generate(strategy["prompt"].format(question=question))
+    raw_expansion = rag_system.generate(
+        strategy["prompt"].format(question=question),
+        options={"num_predict": 256}, think=False, label="expand",
+    )
     queries = _parse_queries(raw_expansion, question)
     print(f"Expansion: {time.time() - t0:.1f}s — {len(queries)} queries:")
     for q in queries:
@@ -359,10 +363,7 @@ def handle_query(data: dict) -> tuple[dict, int]:
 
     context = _format_context(sources)
     t0 = time.time()
-    answer = rag_system.generate(
-        strategy["answer"].format(context=context, question=question),
-        options=_GENERATION_OPTIONS,
-    )
+    answer = rag_system.generate(answer_prompt, options=_GENERATION_OPTIONS, label="answer")
     print(f"Answer:    {time.time() - t0:.1f}s")
 
     t0 = time.time()
