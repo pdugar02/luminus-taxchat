@@ -366,24 +366,28 @@ def handle_query(data: dict) -> tuple[dict, int]:
     answer = rag_system.generate(answer_prompt, options=_GENERATION_OPTIONS, label="answer")
     print(f"Answer:    {time.time() - t0:.1f}s")
 
-    t0 = time.time()
-    verdict = rag_system.generate(
-        VERIFY_PROMPT.format(question=question, answer=answer, context=context),
-        options=_GENERATION_OPTIONS,
-    )
-    feedback = verdict.strip()
-    print(f"Verify:    {time.time() - t0:.1f}s — {feedback[:80]}")
-    # only retry on substantive feedback; an empty verdict is a verifier failure, not a rejection
-    if feedback and feedback.upper() != "PASS":
-        t0 = time.time()
-        # keep the feedback out of the statute context so it can't be cited as source text
-        retry = rag_system.generate(strategy["answer"].format(
-            context=context,
-            question=f"{question}\n\n(A previous draft of this answer was rejected because: {feedback} — make sure this answer fixes that.)",
-        ), options=_GENERATION_OPTIONS)
-        if retry.strip():
-            answer = retry
-        print(f"Retry:     {time.time() - t0:.1f}s")
+    # Verify/retry pass disabled for latency: it costs ~56s (mostly the model's thinking)
+    # and, being fail-open, mostly rubber-stamps PASS. Commented out rather than removed so
+    # it can be restored if answer quality regresses.
+    # t0 = time.time()
+    # verdict = rag_system.generate(
+    #     VERIFY_PROMPT.format(question=question, answer=answer, context=context),
+    #     options=_GENERATION_OPTIONS,
+    #     label="verify",
+    # )
+    # feedback = verdict.strip()
+    # print(f"Verify:    {time.time() - t0:.1f}s — {feedback[:80]}")
+    # # only retry on substantive feedback; an empty verdict is a verifier failure, not a rejection
+    # if feedback and feedback.upper() != "PASS":
+    #     t0 = time.time()
+    #     # keep the feedback out of the statute context so it can't be cited as source text
+    #     retry = rag_system.generate(strategy["answer"].format(
+    #         context=context,
+    #         question=f"{question}\n\n(A previous draft of this answer was rejected because: {feedback} — make sure this answer fixes that.)",
+    #     ), options=_GENERATION_OPTIONS, label="retry")
+    #     if retry.strip():
+    #         answer = retry
+    #     print(f"Retry:     {time.time() - t0:.1f}s")
 
     print(f"Total:     {time.time() - start:.1f}s")
     return {
