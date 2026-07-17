@@ -136,7 +136,7 @@ def _clean_latex(text: str) -> str:
     text = re.sub(r"\$\$([^$]+)\$\$", r"\1", text)
     text = re.sub(r"\$([^$\n]*\\[^$\n]*)\$", r"\1", text)
     text = re.sub(r"\$([^$\n]*[<>=≤≥][^$\n]*)\$", r"\1", text)
-    text = re.sub(r"\$(\d+(?:\([^)$\n]*\))+)\$", r"\1", text)
+    text = re.sub(r"\$(§?\d+[A-Z]{0,3}(?:\([^)$\n]*\))+)\$", r"\1", text)
     for _ in range(2):  # unwrap nested \text{\text{...}}
         text = re.sub(r"\\(?:text|mathrm|mathbf|mathit|mathsf)\{([^{}]*)\}", r"\1", text)
     for pattern, repl in _LATEX_SYMBOLS:
