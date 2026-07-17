@@ -100,3 +100,43 @@ python3 app.py
 - **"Connection refused" or errors mentioning `localhost:11434`** — Ollama isn't running. Open the Ollama application and try again.
 - **The app can't find `usc26.xml`** — Double check the file is at `data/usc26.xml` (exact name, lowercase) and that Step 6 was run after placing it there.
 - **Port 5001 is already in use** — Run `python3 app.py --port 5002` instead, and open `http://localhost:5002` in your browser.
+
+## How the code works
+
+Tax Chat works in two phases: a one-time **prep phase** that turns the tax code into something searchable, and a **chat phase** that runs every time someone asks a question.
+
+### Phase 1: Preparing the tax code (`ingest.py`, `chunk.py`, `xml_parser.py`)
+
+The tax code is one enormous XML file — too big and too unstructured to hand to an AI model directly. This phase breaks it into small, well-organized pieces:
+
+1. **`xml_parser.py`** reads the raw XML and walks through its structure (titles, subtitles, chapters, sections), pulling out the text and remembering how each piece fits into the hierarchy — for example, that Section 162 belongs to Chapter 1 of Subtitle A.
+2. **`ingest.py`** cleans up that text (removing redundant headings, extra whitespace, etc.) and figures out which other sections each piece of text refers to (e.g., "as defined in section 212").
+3. **`chunk.py`** splits long sections into bite-sized "chunks" of a few hundred words each — small enough for the AI to process, but not so small that they lose meaning. It tries to split at natural boundaries like `(a)`, `(b)`, `(c)` rather than mid-sentence.
+
+The result is a file, `data/rag_chunks2.json`, containing thousands of these chunks, each tagged with its section number, heading, and where it sits in the tax code's structure.
+
+### Phase 2: Building the search index (`rag.py`)
+
+Before the app can answer questions, it needs a fast way to find the *right* chunks for a given question out of the thousands available. `rag.py` builds two search systems side by side:
+
+- A **keyword search** (like Ctrl+F, but smarter) that's good at matching exact terms and section numbers.
+- A **semantic search** that converts each chunk's meaning into a list of numbers (an "embedding") so the computer can find chunks that are conceptually similar to a question, even if they don't share exact words.
+
+Both searches run every time someone asks a question, and their results are blended together — this combination tends to find better matches than either search alone.
+
+### Phase 3: Answering a question (`query.py`)
+
+This is what happens, step by step, when someone types a question into the chat:
+
+1. **Rephrase follow-ups.** If this is a follow-up to earlier messages ("what about for a small business?"), the AI rewrites it into a standalone question first, using the chat history for context.
+2. **Classify the question.** The AI decides what *kind* of question it is — for example, is the person asking for a specific calculation, a general list of options, or the definition of a term? This decision controls how thorough the next steps will be.
+3. **Look up any sections named directly.** If the question mentions a specific section number, that section is fetched immediately, guaranteeing it's included.
+4. **Expand the question.** The AI generates a handful of related search queries to cast a wider net (e.g., one question might become three or four searches covering different angles).
+5. **Search the tax code.** Each of those searches runs against the index built in Phase 2, and the results are combined and trimmed down to the most relevant chunks.
+6. **Pull in cross-references.** If the top chunks mention other sections (e.g., "except as provided in section 401"), a few of those referenced sections are pulled in too, so the answer doesn't miss important exceptions.
+7. **Write the answer.** All the selected tax code text is handed to the AI along with the original question, and it writes an answer that cites its sources.
+8. **Double-check the answer.** A second pass asks the AI to verify its own answer against the source text. If something looks off, the answer is rewritten once before being shown to the user.
+
+### The web page (`app.py`, `templates/index.html`)
+
+This is the simplest part: a small Flask web server shows the chat window in your browser, sends each question you type to the steps above, and displays the answer that comes back. It also remembers the conversation on your screen so follow-up questions have context.
