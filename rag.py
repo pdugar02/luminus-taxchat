@@ -120,18 +120,22 @@ class TaxCodeRAG:
         # exact-citation lookup: section number → list of chunks, in document order
         self._section_map: Dict[str, List[Dict]] = {}
         for chunk in self._bm25_chunks:
+            # index by the bare section number ("162" for "162(a)"); dedupe since a
+            # chunk's identifiers may list several subsections of the same section
+            sections = set()
             for ident in chunk["metadata"].get("identifiers") or []:
-                # index by the bare section number ("162" for "162(a)")
                 m = re.match(r'\d+[A-Z]{0,2}(?:-\d+)?', str(ident))
                 if m:
-                    self._section_map.setdefault(m.group(0), []).append(chunk)
+                    sections.add(m.group(0))
+            for sec in sections:
+                self._section_map.setdefault(sec, []).append(chunk)
         print(f"BM25 index built ({len(docs)} documents, {len(self._section_map)} sections)")
 
     @staticmethod
     def _decode_meta(meta: Dict) -> Dict:
         """Decode JSON-encoded list fields from Chroma's flat metadata."""
         out = dict(meta or {})
-        for key in ("identifiers", "ref_sections"):
+        for key in ("identifiers", "ref_sections", "subsections"):
             val = out.get(key)
             if isinstance(val, str):
                 try:
@@ -205,6 +209,7 @@ class TaxCodeRAG:
                 metadatas.append({
                     "identifier": str(m.get("identifier") or ""),
                     "identifiers": json.dumps([str(i) for i in identifiers if i is not None]),
+                    "subsections": json.dumps(m.get("subsections") or []),
                     "heading": (m.get("heading") or "")[:100],
                     "tag": m.get("tag") or "",
                     "hierarchy_path": _hierarchy_path(m)[:300],
