@@ -80,25 +80,22 @@ class StructureFirstChunker:
     def _find_subsection_boundaries(self, text: str) -> List[Tuple[int, str]]:
         """
         Find subsection boundaries like (a), (b), (c), etc. in US tax code sections.
-        Pattern matches (lowercase_letter) followed by space and capital letter.
-        Returns list of (position, subsection_label) tuples sorted by position.
+        A boundary is a marker whose last group is a (lowercase_letter) followed by
+        space and a capital letter; the match extends left over any preceding groups
+        so a full path like "(b)(5)(B)(i) In general" splits at "(b)", keeping the
+        whole path with the new chunk instead of orphaning it in the previous one.
+        Returns list of (position, full_path_label) tuples sorted by position.
         """
         boundaries = []
-        
-        # Pattern: (lowercase_letter) followed by space and capital letter, not immediately
-        # preceded by another ")" — top-level subsection markers like "(a) Married individuals..."
-        # stand alone, whereas nested paragraph/clause labels are chained directly onto their
-        # parent's label (e.g. "(f)(1)(A)(i)"). Without the lookbehind, single-letter roman
-        # numeral clause labels ("(i)", "(v)", "(x)"...) collide with the [a-z] pattern and get
-        # misdetected as new top-level subsections, shredding sections like §199A that are full
-        # of "(i) In general" clauses.
-        pattern = r'(?<!\))\(([a-z])\)\s+([A-Z])'
-        
+
+        # Optional run of parenthesized groups, ending in (lowercase_letter) + space + capital.
+        # Matches "(a) Married individuals..." as well as "(b)(5)(B)(i) In general...".
+        pattern = r'((?:\((?:[a-z]{1,3}|\d{1,2}|[A-Z]{1,3})\))*\([a-z]\))\s+[A-Z]'
+
         for match in re.finditer(pattern, text):
             pos = match.start()
-            subsection_label = match.group(1)  # Extract just the letter, e.g., 'a', 'b'
-            boundaries.append((pos, f"({subsection_label})"))
-        
+            boundaries.append((pos, match.group(1)))
+
         # Sort by position
         boundaries.sort(key=lambda x: x[0])
 
@@ -159,14 +156,14 @@ class StructureFirstChunker:
             return []  # Caller will use token fallback
         first_pos, _ = boundaries[0]
         intro_text = text[:first_pos].strip()
-        subsections: List[Tuple[int, int, str]] = []
-        for i, (pos, _label) in enumerate(boundaries):
+        subsections: List[Tuple[int, int, str, str]] = []
+        for i, (pos, label) in enumerate(boundaries):
             end = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(text)
-            subsections.append((pos, end, text[pos:end].strip()))
+            subsections.append((pos, end, text[pos:end].strip(), label))
 
         # build text snippet from subsections i to j
         def build_text(i: int, j: int) -> str:
-            body = " ".join(text for pos, end, text in subsections[i:j] if text)
+            body = " ".join(text for pos, end, text, label in subsections[i:j] if text)
             return f"{intro_text} {body}".strip() if intro_text else body
 
         def split_ranges(i: int, j: int) -> List[Tuple[int, int]]:
@@ -189,18 +186,28 @@ class StructureFirstChunker:
 
         ranges = split_ranges(0, len(subsections))
         out: List[ContiguousChunk] = []
+        section_id = metadata.get('identifier')
         for idx, (i, j) in enumerate(ranges, 1):
             start_pos = subsections[i][0]
             end_pos = subsections[j - 1][1]
             range_text = build_text(i, j)
             range_tokens = self.count_tokens(range_text)
             part_id = f"{chunk_id}_part_{idx}"
+            # record which subsections this part covers, both as display labels
+            # ("(b)(5)(B)(i)") and as citable identifiers ("179(b)(5)(B)(i)")
+            part_metadata = metadata.copy()
+            labels = [label for pos, end, text, label in subsections[i:j]]
+            part_metadata['subsections'] = labels
+            if section_id is not None:
+                part_metadata['identifiers'] = [str(section_id)] + [
+                    f"{section_id}{label}" for label in labels
+                ]
             if range_tokens <= self.max_chunk_tokens:
                 out.append(
                     ContiguousChunk(
                         id=part_id,
                         text=range_text,
-                        metadata=metadata.copy(),
+                        metadata=part_metadata,
                         chunk_index=idx,
                         start_char=start_pos,
                         end_char=end_pos,
@@ -209,7 +216,7 @@ class StructureFirstChunker:
             else:
                 # Single subsection (or range) still too large: fallback split by tokens
                 out.extend(
-                    self._split_by_token_fallback(range_text, part_id, metadata, start_pos)
+                    self._split_by_token_fallback(range_text, part_id, part_metadata, start_pos)
                 )
         return out
     
@@ -276,7 +283,7 @@ class StructureFirstChunker:
         """
         Merge a small chunk (<min_tokens) with next consecutive chunks that are
         also small. Each raw chunk is a whole <section> element (see
-        old_ingest.py XMLParser.CHUNKABLE_ELEMENTS), so a merge here always
+        xml_parser.py XMLParser.CHUNKABLE_ELEMENTS), so a merge here always
         combines multiple *distinct* legal sections, not pieces of one section.
         A candidate is only folded in while it is itself small — a large
         section is never absorbed, since re-splitting a multi-section blob by

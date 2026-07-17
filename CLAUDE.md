@@ -69,7 +69,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 Tax Chat is a RAG (Retrieval-Augmented Generation) system that helps **taxpayers and business owners** get answers to questions about the US Tax Code (Title 26 / IRC). It parses `data/usc26.xml`, chunks the XML into token-bounded units that respect legal structure, embeds them into a ChromaDB vector store via Ollama, and answers questions through a Flask web UI.
 
-The query pipeline classifies the incoming question into one of six types (see **Question Types** below), then selects a type-specific retrieval strategy — number of expanded queries, retrieval depth, and answer format — before running hybrid BM25 + semantic retrieval fused via Reciprocal Rank Fusion (RRF), LLM-based reranking, and answer generation.
+The query pipeline supports multi-turn conversation: follow-up questions are condensed into standalone questions using the chat history, then classified into one of six types (see **Question Types** below). The type selects a retrieval strategy — number of expanded queries, retrieval depth, and answer format — before running hybrid BM25 + semantic retrieval fused via Reciprocal Rank Fusion (RRF), exact-citation lookup for sections the user named, one-hop cross-reference expansion, answer generation, and a verify/retry pass.
 
 ## Prerequisites
 
@@ -111,8 +111,14 @@ RAG_INDEX_NAME=rag_chunks2 python app.py
 
 **Analysis tools:**
 ```bash
-python analyze_chunks.py data/rag_chunks2.json
-python flag_large_chunks.py
+python scripts/analyze_chunks.py data/rag_chunks2.json
+python scripts/flag_large_chunks.py
+```
+
+**Retrieval evaluation (golden set):**
+```bash
+python scripts/eval_retrieval.py            # plain hybrid retrieve, no LLM needed
+python scripts/eval_retrieval.py --full     # full pipeline (classify + expand)
 ```
 
 ## Architecture
@@ -129,23 +135,24 @@ usc26.xml
 
 ### Layer Responsibilities
 
-**Ingestion (`ingest.py`, `chunk.py`):**
-`ingest.py` orchestrates the full pipeline: it calls `old_scripts/old_ingest.py`'s `XMLParser` to parse the USLM XML into raw chunks, cleans text (strips redundant headings/identifiers, normalizes whitespace), then passes them through `chunk_for_rag_contiguous()` in `chunk.py`. `StructureFirstChunker` targets 300–700 tokens per chunk, splits large sections at subsection boundaries (`(a)`, `(b)`, …), merges small consecutive chunks within the same section, and enforces a hard 1800-token cap. Output is written to `data/rag_chunks2.json`.
+**Ingestion (`ingest.py`, `chunk.py`, `xml_parser.py`):**
+`ingest.py` orchestrates the full pipeline: it calls `xml_parser.py`'s `XMLParser` to parse the USLM XML into raw chunks, cleans text (strips redundant headings/identifiers, normalizes whitespace), then passes them through `chunk_for_rag_contiguous()` in `chunk.py`. Text extraction is lossless over statute text (drop-list of editorial tags — `note`, `sourceCredit`, `toc` — rather than a whitelist), so inline `<date>`, `<ref>`, `<quotedContent>`, and `<subclause>` content is preserved. Each section also carries its effective-date note (`metadata.effective_date_note`) and each chunk the IRC sections its text cross-references (`metadata.ref_sections`, extracted by regex in `ingest.py`). Repealed and renumbered stub sections are skipped. `StructureFirstChunker` targets 300–700 tokens per chunk, splits large sections at subsection boundaries (`(a)`, `(b)`, …), merges small consecutive chunks within the same section, and enforces a hard 1800-token cap. Output is written to `data/rag_chunks2.json`.
 
 **Indexing/Retrieval (`rag.py`):**
-`TaxCodeRAG` uses ChromaDB (persistent, in `data/index_<name>/`) for vector storage and `rank_bm25` for in-memory keyword search. On startup it builds or loads the Chroma collection, then constructs a BM25 index over the same documents. `retrieve()` runs both searches in parallel, fetches `top_k * 3` candidates each, and merges them with RRF (`k=60`). Chunk texts are prefixed with `§<identifier> <heading>:` and truncated to 1800 tokens before embedding.
+`TaxCodeRAG` uses ChromaDB (persistent, in `data/index_<name>/`) for vector storage and `rank_bm25` for in-memory keyword search. On startup it builds or loads the Chroma collection, then constructs a BM25 index (alphanumeric tokenization, so "§162(a)" matches "162 a") and a section-number → chunks map over the same documents. `retrieve()` runs both searches, fetches `top_k * 3` candidates each, and merges them with RRF (`k=60`). Chunk texts are prefixed with `§<identifier> <heading> [<hierarchy path>]:` and truncated to 1800 tokens; nomic task prefixes (`search_document:` / `search_query:`) are applied at embed time only. Chroma metadata carries `identifiers`, `hierarchy_path`, `parent_id`, `ref_sections`, and `effective_date_note`. `lookup_sections()` provides exact-citation retrieval; `expand_refs()` provides one-hop cross-reference expansion.
 
 **Query handling (`query.py`):**
-`handle_query()` drives the multi-step pipeline:
-1. **Classification** — asks the LLM to classify the question into one of six types (see **Question Types**); falls back to keyword heuristics if the LLM response is ambiguous
-2. **Strategy selection** — picks a type-specific strategy: expansion prompt, number of queries, retrieval `top_k`, chunk cap, and answer prompt
-3. **Query expansion** — asks the LLM to decompose the question into N targeted IRC search queries (N varies by type: 2–5)
-4. **Hybrid retrieval** — calls `rag.retrieve(q, top_k=<strategy top_k>)` per expanded query, deduplicates by chunk ID keeping the highest RRF score, caps at `<strategy cap>` chunks
-5. **LLM reranking** — asks the LLM to reorder candidates by applicability to the specific question
-6. **Answer generation** — formats the top-ranked chunks as context and calls the LLM with the type-specific answer prompt
+`handle_query()` drives the multi-step pipeline (accepts optional `history` for multi-turn chat):
+1. **Condensation** — if history is present, rewrites the follow-up into a standalone question
+2. **Classification** — asks the LLM to classify the question into one of six types (see **Question Types**); falls back to keyword heuristics if the LLM response is ambiguous
+3. **Exact-citation pinning** — sections explicitly named in the question are looked up directly and pinned above retrieved chunks
+4. **Query expansion** — asks the LLM to decompose the question into N targeted IRC search queries (N varies by type: 2–5)
+5. **Hybrid retrieval** — calls `rag.retrieve(q, top_k=<strategy top_k>)` per expanded query, deduplicates by chunk ID keeping the highest RRF score, caps at `<strategy cap>` chunks, then adds up to 3 one-hop cross-referenced sections
+6. **Answer generation** — formats the top-ranked chunks (with hierarchy path and effective-date notes) as context and calls the LLM with the type-specific answer prompt
+7. **Verify/retry** — a verification prompt checks the answer against the sources; on failure the answer is regenerated once with the feedback (kept outside the statute context)
 
 **Web layer (`app.py`, `templates/index.html`):**
-Flask app with two routes: `GET /` renders the chat UI and `POST /api/query` calls `handle_query()`. The RAG instance is initialized at startup (not lazily) so the first request doesn't pay the init cost.
+Flask app with two routes: `GET /` renders the chat UI and `POST /api/query` calls `handle_query()`. The UI keeps the conversation in a client-side `chatHistory` array and sends it with each request. The RAG instance is initialized at startup (not lazily) so the first request doesn't pay the init cost.
 
 ### Key Defaults (in `rag.py`)
 | Setting | Value |
@@ -157,15 +164,17 @@ Flask app with two routes: `GET /` renders the chat UI and `POST /api/query` cal
 | RRF constant k | 60 |
 | Max embedding tokens | 1800 |
 
-### Retrieval Parameters by Question Type (in `query.py`)
-| Question Type | Queries generated | top_k per query | Max chunks to LLM |
+### Retrieval Parameters by Question Type (in `query.py` `_STRATEGY`)
+| Question Type | Queries generated | top_k per query | Max chunks to LLM (cap) |
 |---|---|---|---|
-| application | 3 | 5 | 12 |
-| survey | 5 | 7 | 20 |
-| exception | 4 | 6 | 18 |
-| definitional | 2 | 4 | 10 |
-| procedural | 3 | 4 | 10 |
-| comparison | 4 | 5 | 16 |
+| application | 3 | 5 | 6 |
+| survey | 5 | 7 | 8 |
+| exception | 4 | 6 | 8 |
+| definitional | 2 | 4 | 5 |
+| procedural | 3 | 4 | 5 |
+| comparison | 4 | 5 | 8 |
+
+(Pinned exact-citation chunks and up to 3 cross-referenced chunks are added on top of the cap.)
 
 ### Chunk JSON Schema (`data/rag_chunks2.json`)
 ```json
@@ -176,7 +185,10 @@ Flask app with two routes: `GET /` renders the chat UI and `POST /api/query` cal
     "identifier": "162",
     "identifiers": ["162", "162(a)"],
     "heading": "Trade or business expenses",
-    "tag": "subsection",
+    "tag": "section",
+    "hierarchy": {"subtitle": {"identifier": "A", "heading": "Income Taxes"}, "chapter": {}, "subchapter": {}},
+    "ref_sections": ["170", "212"],
+    "effective_date_note": "Effective Date of 2025 Amendment ...",
     "token_count": 450,
     "parent_id": "section-162",
     "children_ids": ["section-162-a-1"],
@@ -186,6 +198,10 @@ Flask app with two routes: `GET /` renders the chat UI and `POST /api/query` cal
   }
 }
 ```
+
+## Evaluation
+
+`eval/golden_set.json` holds ~35 questions with the IRC sections a correct retrieval must surface. `scripts/eval_retrieval.py` reports per-question hits and overall section recall — run it before and after any retrieval/chunking change. Retrieval recall is measured separately from answer quality on purpose: fix retrieval regressions before tuning prompts.
 
 ## Question Types
 
