@@ -5,9 +5,8 @@ You are helping evaluate and improve the luminus-taxchat RAG system.
 ## Steps
 
 1. Run the evaluator script with the user's question:
-   ```
-   python eval_improve.py $ARGUMENTS
-   ```
+
+   python```python scripts/eval_improve.py $ARGUMENTS```
    Make sure to run from the project root. If ANTHROPIC_API_KEY is not set, tell the user to export it first.
 
 2. Read the output carefully. It contains:
