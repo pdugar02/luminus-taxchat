@@ -137,6 +137,12 @@ def _clean_latex(text: str) -> str:
     text = re.sub(r"\$([^$\n]*\\[^$\n]*)\$", r"\1", text)
     text = re.sub(r"\$([^$\n]*[<>=≤≥][^$\n]*)\$", r"\1", text)
     text = re.sub(r"\$(§?\d+[A-Z]{0,3}(?:\([^)$\n]*\))+)\$", r"\1", text)
+    # strip multi-line math scaffolding: \begin{gathered}...\end{gathered} and
+    # friends, the \\ row break, and \(...\) / \[...\] delimiters. Left in, these
+    # leak as literal "begin{gathered}", a stray "\", and "end{gathered}".
+    text = re.sub(r"\\(?:begin|end)\{[^{}]*\}(?:\{[^{}]*\})?", "", text)
+    text = re.sub(r"\\\\", "\n", text)
+    text = re.sub(r"\\[()\[\]]", "", text)
     for _ in range(2):  # unwrap nested \text{\text{...}}
         text = re.sub(r"\\(?:text|mathrm|mathbf|mathit|mathsf)\{([^{}]*)\}", r"\1", text)
     for pattern, repl in _LATEX_SYMBOLS:
